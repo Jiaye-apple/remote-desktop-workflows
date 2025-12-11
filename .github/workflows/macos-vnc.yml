@@ -1,70 +1,96 @@
-name: Mac-NewUser-Fix
-on: workflow_dispatch
+name: macOS-Remote-Desktop-ngrok
+on: 
+  workflow_dispatch:
+    inputs:
+      ngrok_token:
+        description: 'ngrok Authtoken (从 https://dashboard.ngrok.com/get-started/your-authtoken 获取)'
+        required: true
+        type: string
 
 jobs:
-  debug-job:
-    # 使用 macOS 13 (Ventura)，这是目前能用的最稳定的版本
-    runs-on: macos-13
+  desktop:
+    runs-on: macos-latest
     timeout-minutes: 360
     
     steps:
       - name: Checkout
         uses: actions/checkout@v3
 
-      # 1.【核心大招】创建一个新的管理员账户 (绕过 runner 账户锁死的问题)
-      - name: Create New Admin User
-        run: |
-          echo "正在创建新用户 adminuser..."
-          # 使用 sysadminctl 工具创建用户 (比 dscl 更高级，不容易报错)
-          sudo sysadminctl -addUser adminuser -fullName "Admin User" -password "123456" -admin
-          echo "✅ 新管理员 adminuser 创建成功，密码: 123456"
-
-      # 2. 禁止睡眠 (防止黑屏)
+      # 1. 禁止休眠
       - name: Disable Sleep
         run: |
           sudo systemsetup -setcomputersleep Never
           sudo systemsetup -setdisplaysleep Never
+          sudo defaults write /Library/Preferences/com.apple.screensaver loginWindowIdleTime 0
           echo "✅ 已禁止休眠"
 
-      # 3. 启动 VNC 并允许新用户登录
+      # 2. 启动 VNC
       - name: Start VNC Server
         run: |
-          echo "正在配置 VNC..."
-          # 激活服务
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-          -activate -configure -access -on -restart -agent -privs -all -allowAccessFor -allUsers
+            -activate -configure -access -on -clientopts -setvnclegacy -vnclegacy yes \
+            -restart -agent -privs -all -allowAccessFor -allUsers
           
-          # 【重点】特别允许 adminuser 访问
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-          -configure -users adminuser -access -on -privs -all
+          VNC_PASSWORD="MacVNC2024!"
+          echo "$VNC_PASSWORD" | sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -configure -clientopts -setvncpw
           
-          echo "✅ VNC 已启动，允许 adminuser 登录"
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -restart -agent
+          echo "VNC_PASSWORD=$VNC_PASSWORD" >> $GITHUB_ENV
+          sleep 5
 
-      # 4. 安装 noVNC (转网页版)
-      - name: Install noVNC
+      # 3. 安装 ngrok
+      - name: Setup ngrok
         run: |
+          brew install ngrok/ngrok/ngrok
+          
+          # 配置 ngrok authtoken
+          ngrok config add-authtoken ${{ github.event.inputs.ngrok_token }}
+          
+          echo "✅ ngrok 已配置"
+
+      # 4. 启动 ngrok HTTP 隧道（免费方案）
+      - name: Start ngrok Tunnel
+        run: |
+          # 先启动 noVNC
           git clone --depth 1 https://github.com/novnc/noVNC.git
-          git clone --depth 1 https://github.com/novnc/websockify noVNC/utils/websockify
-          ./noVNC/utils/novnc_proxy --vnc localhost:5900 --listen 6080 &
-
-      # 5. 启动 Cloudflare
-      - name: Start Cloudflare Tunnel
-        run: |
-          brew install cloudflared
-          cloudflared tunnel --url http://localhost:6080 > tunnel.log 2>&1 &
+          git clone --depth 1 https://github.com/novnc/websockify.git noVNC/utils/websockify
+          python3 -m pip install numpy --break-system-packages 2>/dev/null || pip3 install numpy
           
-          echo "生成链接中..."
+          cd noVNC
+          nohup ./utils/novnc_proxy --vnc localhost:5900 --listen 6080 > ../novnc.log 2>&1 &
+          sleep 5
+          
+          # 使用 ngrok HTTP 隧道（免费）
+          cd ..
+          nohup ngrok http 6080 > ngrok.log 2>&1 &
+          
           sleep 10
           
-          echo "========================================================"
-          echo "🎉 链接已生成！请务必使用下面的账号登录："
-          echo "--------------------------------------------------------"
-          grep -o 'https://.*\.trycloudflare.com' tunnel.log | head -n 1
-          echo "--------------------------------------------------------"
-          echo "👤 用户名 (Username): adminuser"
-          echo "🔑 密  码 (Password): 123456"
-          echo "⚠️ 注意：不要用默认的 runner，一定要填 adminuser！"
-          echo "========================================================"
+          # 获取 ngrok 链接
+          NGROK_URL=$(curl -s http://localhost:4040/api/tunnels | grep -o '"public_url":"https://[^"]*"' | head -n1 | cut -d'"' -f4)
+          
+          if [ -z "$NGROK_URL" ]; then
+            echo "❌ 未能获取 ngrok 地址"
+            cat ngrok.log
+            exit 1
+          fi
+          
+          echo "=========================================================="
+          echo "🌐 远程桌面访问地址："
+          echo "=========================================================="
+          echo ""
+          echo "   $NGROK_URL"
+          echo ""
+          echo "=========================================================="
+          echo "🔑 VNC 密码: $VNC_PASSWORD"
+          echo "=========================================================="
+          
+          echo "NGROK_URL=$NGROK_URL" >> $GITHUB_ENV
 
+      # 5. 保持运行
       - name: Keep Alive
-        run: sleep 21600
+        run: |
+          echo "✅ 服务运行中..."
+          echo "🔗 访问链接: $NGROK_URL"
+          sleep 21600
