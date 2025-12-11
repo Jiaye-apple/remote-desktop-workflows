@@ -10,58 +10,98 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v3
 
-      # 1. 【核心修复】使用 sysadminctl 强力重置 runner 密码
-      # 我们用复杂密码 "MyStrongPass123!" 绕过安全检查
-      - name: Force Reset Runner Password
+      # 1. 重置密码
+      - name: Reset Runner Password
         run: |
           echo "正在重置 runner 密码..."
-          sudo sysadminctl -resetPasswordFor runner -newPassword "MyStrongPass123!"
-          echo "✅ runner 密码已成功重置！"
+          sudo dscl . -passwd /Users/runner "MyStrongPass123!"
+          echo "✅ 密码重置完成"
 
-      # 2. 禁止睡眠和屏保 (防止黑屏)
-      - name: Disable Sleep & Screensaver
+      # 2. 禁止睡眠
+      - name: Disable Sleep
         run: |
           sudo systemsetup -setcomputersleep Never
           sudo systemsetup -setdisplaysleep Never
           sudo defaults write /Library/Preferences/com.apple.screensaver loginWindowIdleTime 0
-          echo "✅ 已禁止自动黑屏"
+          echo "✅ 已禁止休眠"
 
-      # 3. 开启 VNC
+      # 3. 启动 VNC（关键修复）
       - name: Start VNC Server
         run: |
-          # 重启屏幕共享服务
+          # 激活远程管理
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-          -activate -configure -access -on -restart -agent -privs -all -allowAccessFor -allUsers
+            -activate -configure -access -on -restart -agent -privs -all -allowAccessFor -allUsers
           
-          # 设置 VNC 连接密码
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-          -configure -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw MyStrongPass123!
-          echo "✅ VNC 启动完毕"
+          # 设置 VNC 密码（正确方式）
+          echo "MyStrongPass123!" | sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -configure -clientopts -setvnclegacy -vnclegacy yes -setvncpw
+          
+          # 重启服务
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -restart -agent
+          
+          echo "✅ VNC 服务启动完成"
+          sleep 5
+          
+          # 验证 VNC 是否在监听
+          netstat -an | grep 5900 || echo "⚠️  警告: VNC 端口 5900 未检测到"
 
-      # 4. 启动 noVNC
+      # 4. 安装并启动 noVNC
+      - name: Setup noVNC
+        run: |
+          # 克隆 noVNC
+          git clone --depth 1 https://github.com/novnc/noVNC.git
+          git clone --depth 1 https://github.com/novnc/websockify.git noVNC/utils/websockify
+          
+          # 安装依赖
+          pip3 install numpy
+          
+          echo "✅ noVNC 安装完成"
+
       - name: Start noVNC
         run: |
-          git clone https://github.com/novnc/noVNC.git
-          git clone https://github.com/novnc/websockify noVNC/utils/websockify
-          ./noVNC/utils/novnc_proxy --vnc localhost:5900 --listen 6080 &
+          cd noVNC
+          # 启动 noVNC（后台运行）
+          ./utils/novnc_proxy --vnc localhost:5900 --listen 6080 > ../novnc.log 2>&1 &
+          
+          sleep 5
+          
+          # 检查是否启动成功
+          if lsof -i :6080 > /dev/null; then
+            echo "✅ noVNC 启动成功，监听端口 6080"
+          else
+            echo "❌ noVNC 启动失败"
+            cat ../novnc.log
+            exit 1
+          fi
 
-      # 5. 启动 Cloudflare
+      # 5. 启动 Cloudflare Tunnel
       - name: Start Cloudflare Tunnel
         run: |
           brew install cloudflared
+          
+          # 启动隧道
           cloudflared tunnel --url http://localhost:6080 > tunnel.log 2>&1 &
           
-          echo "生成链接中..."
-          sleep 10
+          # 等待隧道建立
+          echo "等待 Cloudflare 隧道建立..."
+          sleep 15
           
+          # 提取并显示访问链接
           echo "========================================================"
-          echo "🔗 只有这个链接能进，复制它："
+          echo "🌐 远程桌面访问链接："
           echo "--------------------------------------------------------"
           grep -o 'https://.*\.trycloudflare.com' tunnel.log | head -n 1
           echo "--------------------------------------------------------"
-          echo "👤 用户名: runner"
-          echo "🔑 密  码: MyStrongPass123!"
+          echo "👤 VNC 密码: MyStrongPass123!"
           echo "========================================================"
+          
+          # 显示完整日志以便调试
+          echo ""
+          echo "📋 Cloudflare 隧道日志:"
+          cat tunnel.log
 
+      # 6. 保持运行
       - name: Keep Alive
-        run: sleep 21600
+        run: |
+          echo "✅ 所有服务已启动，保持运行 6 小时..."
+          sleep 21600
