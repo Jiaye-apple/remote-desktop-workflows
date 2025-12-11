@@ -1,4 +1,4 @@
-name: RealVNC-NoSystemPass
+name: RealVNC-Env-Var-Fix
 on: workflow_dispatch
 
 jobs:
@@ -10,50 +10,47 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v3
 
-      # 1. 禁止睡眠和屏保 (这是防止黑屏的关键，必须放在最前面)
-      - name: Disable Sleep & Screensaver
+      # 1. 防止黑屏
+      - name: Disable Sleep
         run: |
           sudo systemsetup -setcomputersleep Never
           sudo systemsetup -setdisplaysleep Never
-          sudo defaults write /Library/Preferences/com.apple.screensaver loginWindowIdleTime 0
-          echo "✅ 已强制禁止休眠"
+          echo "✅ 已禁止休眠"
 
-      # 2. 启动 VNC 服务 (只设连接密码，不碰系统密码)
+      # 2. 启动 VNC (密码 123456)
       - name: Start VNC Server
         run: |
-          echo "正在启动 VNC..."
-          
-          # 开启远程管理权限
+          # 开启权限
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
           -activate -configure -access -on -restart -agent -privs -all -allowAccessFor -allUsers
           
-          # 设置 VNC 专用连接密码为 MyStrongPass123!
-          # 注意：这里我们避开了修改系统用户密码，只改 VNC 密码，绝对不会报错
+          # 设置 VNC 密码 (跳过系统密码)
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-          -configure -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw MyStrongPass123!
+          -configure -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw 123456
           
-          echo "✅ VNC 服务已启动，密码设为: MyStrongPass123!"
+          echo "✅ VNC 启动成功，密码: 123456"
 
-      # 3. 启动 Ngrok (让 RealVNC 软件能连上)
+      # 3. 启动 Ngrok (变量方式)
       - name: Start Ngrok Tunnel
         env:
-          NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
+          # 关键修改：左边必须写 NGROK_AUTHTOKEN (没有下划线)，右边是你 GitHub 的 Secret
+          NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
         run: |
           brew install ngrok/ngrok/ngrok
           
-          # 转发 5900 端口
+          # 直接启动，它会自动读取上面的 NGROK_AUTHTOKEN 变量
           ngrok tcp 5900 --log=stdout > ngrok.log &
           
-          echo "正在建立连接..."
+          echo "正在连接..."
           sleep 10
           
           echo "========================================================"
-          echo "🚀 连接成功！请在 RealVNC Viewer 顶部框输入："
+          echo "🚀 连接成功！RealVNC Viewer 地址："
           echo "--------------------------------------------------------"
           grep -o "tcp://.*:[0-9]*" ngrok.log
           echo "--------------------------------------------------------"
-          echo "🔑 密码 (Password): MyStrongPass123!"
-          echo "👤 用户名 (Username): (如果一定要填，试试 runner，或者留空)"
+          echo "🔑 密码: 123456"
+          echo "👤 用户名: (一定要留空！！)"
           echo "========================================================"
 
       - name: Keep Alive
