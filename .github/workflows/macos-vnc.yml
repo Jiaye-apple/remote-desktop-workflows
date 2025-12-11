@@ -1,62 +1,53 @@
-name: Electron-Debug-Mac
+name: Mac-Debug-Final-Fix
 on: workflow_dispatch
 
 jobs:
   debug-job:
-    runs-on: macos-latest
-    timeout-minutes: 360 # 给足6小时调试时间
+    # 🔴 关键修改：强制使用 macOS 12 (Monterey)
+    # 只有这个旧版本允许我们用 kickstart 命令设置 VNC 密码
+    runs-on: macos-12
+    timeout-minutes: 360
     
     steps:
       - name: Checkout
         uses: actions/checkout@v3
 
-      # 1. 强制禁止睡眠 (防止连接后黑屏)
-      - name: Disable Sleep
+      # 1. 启动 VNC (在 macOS 12 上这行命令是有效的)
+      - name: Start VNC
         run: |
-          sudo systemsetup -setcomputersleep Never
-          sudo systemsetup -setdisplaysleep Never
-          echo "✅ 已禁止自动黑屏"
-
-      # 2. 启动 VNC 服务 (只设置连接密码 123456)
-      - name: Start VNC Server
-        run: |
-          # 开启权限
+          echo "正在启动 VNC 服务..."
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
           -activate -configure -access -on -restart -agent -privs -all -allowAccessFor -allUsers
           
-          # 设置 VNC 密码为 123456 (简单粗暴)
+          # 设置密码 123456 (macOS 12 允许这么做)
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
           -configure -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw 123456
           
           echo "✅ VNC 启动成功"
 
-      # 3. 安装 noVNC (把桌面转成网页视频流，绕过 Ngrok 限制)
+      # 2. 安装 noVNC (转网页版)
       - name: Install noVNC
         run: |
           git clone --depth 1 https://github.com/novnc/noVNC.git
           git clone --depth 1 https://github.com/novnc/websockify noVNC/utils/websockify
-          
-          # 启动转换器：把 5900 转到 6080
           ./noVNC/utils/novnc_proxy --vnc localhost:5900 --listen 6080 &
 
-      # 4. 启动 Cloudflare (免费通道，不需绑卡)
+      # 3. 启动 Cloudflare (免费通道)
       - name: Start Cloudflare Tunnel
         run: |
           brew install cloudflared
-          
-          # 穿透网页端口 6080
           cloudflared tunnel --url http://localhost:6080 > tunnel.log 2>&1 &
           
-          echo "正在生成链接..."
+          echo "生成链接中..."
           sleep 10
           
           echo "========================================================"
-          echo "🎉 调试环境就绪！请复制下面的链接到浏览器打开："
+          echo "🎉 调试链接 (macOS 12 版) 已生成："
           echo "--------------------------------------------------------"
           grep -o 'https://.*\.trycloudflare.com' tunnel.log | head -n 1
           echo "--------------------------------------------------------"
           echo "🔑 密码: 123456"
-          echo "👤 用户名: (留空不填)"
+          echo "👤 用户名: (留空)"
           echo "========================================================"
 
       - name: Keep Alive
