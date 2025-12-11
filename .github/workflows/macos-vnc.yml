@@ -1,11 +1,5 @@
-name: macOS-Remote-Desktop-ngrok
-on: 
-  workflow_dispatch:
-    inputs:
-      ngrok_token:
-        description: 'ngrok Authtoken (从 https://dashboard.ngrok.com/get-started/your-authtoken 获取)'
-        required: true
-        type: string
+name: macOS-Screen-Share-Working
+on: workflow_dispatch
 
 jobs:
   desktop:
@@ -21,58 +15,222 @@ jobs:
         run: |
           sudo systemsetup -setcomputersleep Never
           sudo systemsetup -setdisplaysleep Never
-          sudo defaults write /Library/Preferences/com.apple.screensaver loginWindowIdleTime 0
+          caffeinate -d &
           echo "✅ 已禁止休眠"
 
-      # 2. 启动 VNC
-      - name: Start VNC Server
+      # 2. 创建截屏 Web 服务器（绕过 VNC 限制）
+      - name: Create Screenshot Server
         run: |
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -activate -configure -access -on -clientopts -setvnclegacy -vnclegacy yes \
-            -restart -agent -privs -all -allowAccessFor -allUsers
+          pip3 install flask pillow
           
-          VNC_PASSWORD="MacVNC2024!"
-          echo "$VNC_PASSWORD" | sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -configure -clientopts -setvncpw
-          
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -restart -agent
-          echo "VNC_PASSWORD=$VNC_PASSWORD" >> $GITHUB_ENV
-          sleep 5
+          cat > screen_server.py << 'EOF'
+from flask import Flask, Response, render_template_string
+import subprocess
+import time
+import os
 
-      # 3. 安装 ngrok
-      - name: Setup ngrok
-        run: |
-          brew install ngrok/ngrok/ngrok
-          
-          # 配置 ngrok authtoken
-          ngrok config add-authtoken ${{ github.event.inputs.ngrok_token }}
-          
-          echo "✅ ngrok 已配置"
+app = Flask(__name__)
 
-      # 4. 启动 ngrok HTTP 隧道（免费方案）
-      - name: Start ngrok Tunnel
-        run: |
-          # 先启动 noVNC
-          git clone --depth 1 https://github.com/novnc/noVNC.git
-          git clone --depth 1 https://github.com/novnc/websockify.git noVNC/utils/websockify
-          python3 -m pip install numpy --break-system-packages 2>/dev/null || pip3 install numpy
+HTML = '''
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>macOS 远程桌面</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { 
+            background: #1a1a1a; 
+            color: #00ff00; 
+            font-family: 'Courier New', monospace;
+            padding: 20px;
+        }
+        .container { max-width: 1600px; margin: 0 auto; }
+        h1 { 
+            color: #00ff00; 
+            text-align: center; 
+            padding: 20px;
+            text-shadow: 0 0 10px #00ff00;
+        }
+        .controls {
+            background: #2a2a2a;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+            border: 2px solid #00ff00;
+        }
+        .controls button {
+            background: #00ff00;
+            color: #000;
+            border: none;
+            padding: 10px 20px;
+            margin: 5px;
+            cursor: pointer;
+            font-weight: bold;
+            border-radius: 3px;
+            font-family: 'Courier New', monospace;
+        }
+        .controls button:hover { background: #00cc00; }
+        .info {
+            background: #2a2a2a;
+            padding: 10px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+            border: 1px solid #00ff00;
+        }
+        .screen-container {
+            background: #000;
+            padding: 10px;
+            border-radius: 5px;
+            border: 3px solid #00ff00;
+            box-shadow: 0 0 20px rgba(0,255,0,0.3);
+        }
+        #screen {
+            width: 100%;
+            display: block;
+            image-rendering: crisp-edges;
+        }
+        .countdown {
+            display: inline-block;
+            padding: 5px 10px;
+            background: #00ff00;
+            color: #000;
+            border-radius: 3px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🖥️ macOS 远程桌面监控</h1>
+        
+        <div class="controls">
+            <button onclick="refresh()">🔄 立即刷新</button>
+            <button onclick="toggleAuto()">⏯️ <span id="autoText">暂停</span>自动刷新</button>
+            <button onclick="fullscreen()">⛶ 全屏</button>
+            <span style="margin-left: 20px;">
+                下次刷新: <span class="countdown" id="countdown">2</span> 秒
+            </span>
+        </div>
+        
+        <div class="info">
+            <p>✅ 状态: <strong>运行中</strong></p>
+            <p>🔄 刷新频率: 每 2 秒</p>
+            <p>💡 提示: 图片会自动更新，无需手动刷新页面</p>
+        </div>
+        
+        <div class="screen-container">
+            <img id="screen" src="/screenshot" alt="Mac Desktop">
+        </div>
+    </div>
+    
+    <script>
+        let autoRefresh = true;
+        let countdown = 2;
+        let timer;
+        
+        function refresh() {
+            document.getElementById('screen').src = '/screenshot?' + Date.now();
+            countdown = 2;
+        }
+        
+        function toggleAuto() {
+            autoRefresh = !autoRefresh;
+            document.getElementById('autoText').textContent = autoRefresh ? '暂停' : '继续';
+        }
+        
+        function fullscreen() {
+            const img = document.getElementById('screen');
+            if (img.requestFullscreen) {
+                img.requestFullscreen();
+            }
+        }
+        
+        setInterval(() => {
+            if (autoRefresh) {
+                countdown--;
+                document.getElementById('countdown').textContent = countdown;
+                if (countdown <= 0) {
+                    refresh();
+                }
+            }
+        }, 1000);
+    </script>
+</body>
+</html>
+'''
+
+@app.route('/')
+def index():
+    return HTML
+
+@app.route('/screenshot')
+def screenshot():
+    try:
+        # 使用 screencapture（不需要屏幕录制权限！）
+        subprocess.run(['screencapture', '-x', '-C', '/tmp/screen.png'], 
+                      check=True, timeout=5)
+        
+        with open('/tmp/screen.png', 'rb') as f:
+            img_data = f.read()
+        
+        return Response(img_data, mimetype='image/png')
+    except Exception as e:
+        # 如果失败，返回错误图片
+        return Response(b'', mimetype='image/png', status=500)
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=8080, threaded=True)
+EOF
           
-          cd noVNC
-          nohup ./utils/novnc_proxy --vnc localhost:5900 --listen 6080 > ../novnc.log 2>&1 &
+          echo "✅ 截屏服务器代码已创建"
+
+      # 3. 启动截屏服务器
+      - name: Start Screenshot Server
+        run: |
+          echo "正在启动截屏服务器..."
+          nohup python3 screen_server.py > server.log 2>&1 &
+          
           sleep 5
           
-          # 使用 ngrok HTTP 隧道（免费）
-          cd ..
-          nohup ngrok http 6080 > ngrok.log 2>&1 &
+          if lsof -i :8080 > /dev/null 2>&1; then
+            echo "✅ 截屏服务器已启动在端口 8080"
+          else
+            echo "❌ 服务器启动失败"
+            cat server.log
+            exit 1
+          fi
+
+      # 4. 测试截屏功能
+      - name: Test Screenshot
+        run: |
+          echo "测试截屏功能..."
+          screencapture -x test.png
           
-          sleep 10
+          if [ -f "test.png" ]; then
+            ls -lh test.png
+            echo "✅ 截屏功能正常"
+          else
+            echo "❌ 截屏失败"
+            exit 1
+          fi
+
+      # 5. 启动 Cloudflare Tunnel
+      - name: Start Cloudflare Tunnel
+        run: |
+          echo "正在安装 cloudflared..."
+          brew install cloudflared
           
-          # 获取 ngrok 链接
-          NGROK_URL=$(curl -s http://localhost:4040/api/tunnels | grep -o '"public_url":"https://[^"]*"' | head -n1 | cut -d'"' -f4)
+          echo "正在启动隧道..."
+          nohup cloudflared tunnel --url http://localhost:8080 > tunnel.log 2>&1 &
           
-          if [ -z "$NGROK_URL" ]; then
-            echo "❌ 未能获取 ngrok 地址"
-            cat ngrok.log
+          sleep 20
+          
+          TUNNEL_URL=$(grep -o 'https://.*\.trycloudflare.com' tunnel.log | head -n 1)
+          
+          if [ -z "$TUNNEL_URL" ]; then
+            echo "❌ 未能获取隧道地址"
+            cat tunnel.log
             exit 1
           fi
           
@@ -80,17 +238,80 @@ jobs:
           echo "🌐 远程桌面访问地址："
           echo "=========================================================="
           echo ""
-          echo "   $NGROK_URL"
+          echo "   $TUNNEL_URL"
           echo ""
           echo "=========================================================="
-          echo "🔑 VNC 密码: $VNC_PASSWORD"
+          echo "📖 使用说明："
+          echo "   1. 复制上面的链接在浏览器打开"
+          echo "   2. 自动每 2 秒刷新屏幕"
+          echo "   3. 可以点击按钮立即刷新或暂停"
+          echo "   4. 可以全屏查看"
+          echo "=========================================================="
+          echo ""
+          echo "💡 提示："
+          echo "   - 这是实时截屏，不是 VNC"
+          echo "   - 可以看到桌面，但不能控制鼠标键盘"
+          echo "   - 适合查看构建过程和应用运行状态"
           echo "=========================================================="
           
-          echo "NGROK_URL=$NGROK_URL" >> $GITHUB_ENV
+          echo "TUNNEL_URL=$TUNNEL_URL" >> $GITHUB_ENV
 
-      # 5. 保持运行
-      - name: Keep Alive
+      # 6. 显示系统信息
+      - name: System Information
+        run: |
+          echo "========== 系统信息 =========="
+          sw_vers
+          echo ""
+          echo "CPU: $(sysctl -n machdep.cpu.brand_string)"
+          echo "内存: $(sysctl -n hw.memsize | awk '{print $0/1024/1024/1024}') GB"
+          echo "磁盘:"
+          df -h /
+          echo ""
+          echo "已安装应用:"
+          ls /Applications/ | head -n 20
+
+      # 7. 保持运行并定期截图
+      - name: Keep Alive and Monitor
         run: |
           echo "✅ 服务运行中..."
-          echo "🔗 访问链接: $NGROK_URL"
-          sleep 21600
+          echo "🔗 访问: $TUNNEL_URL"
+          echo ""
+          echo "保持运行 6 小时..."
+          
+          # 每分钟检查并截图
+          for i in {1..360}; do
+            sleep 60
+            
+            # 截图保存
+            screencapture -x "snapshot_$(date +%H%M).png" 2>/dev/null || true
+            
+            # 每 10 分钟显示状态
+            if [ $((i % 10)) -eq 0 ]; then
+              echo "✅ [$i/360] 运行正常 (已运行 $i 分钟)"
+              echo "🔗 链接: $TUNNEL_URL"
+              
+              # 检查服务
+              if ! lsof -i :8080 > /dev/null 2>&1; then
+                echo "⚠️  截屏服务器重启中..."
+                nohup python3 screen_server.py > server.log 2>&1 &
+                sleep 3
+              fi
+              
+              if ! pgrep -f cloudflared > /dev/null; then
+                echo "⚠️  Cloudflare 隧道重启中..."
+                nohup cloudflared tunnel --url http://localhost:8080 > tunnel.log 2>&1 &
+                sleep 10
+                grep -o 'https://.*\.trycloudflare.com' tunnel.log | head -n 1
+              fi
+            fi
+          done
+
+      # 8. 上传所有截图
+      - name: Upload Screenshots
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: screenshots
+          path: |
+            *.png
+            *.log
