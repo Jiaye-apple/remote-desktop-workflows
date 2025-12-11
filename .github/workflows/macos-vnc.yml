@@ -1,4 +1,4 @@
-name: New-User-Login
+name: Fix-Black-Screen
 on: workflow_dispatch
 
 jobs:
@@ -10,42 +10,42 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v3
 
-      # 1. 【核心】创建一个全新的管理员账户 (绕过 runner 账户限制)
-      - name: Create New Admin User
+      # 1. 【核心修复】使用 sysadminctl 强力重置 runner 密码
+      # 我们用复杂密码 "MyStrongPass123!" 绕过安全检查
+      - name: Force Reset Runner Password
         run: |
-          echo "正在创建新用户 macadmin..."
-          # 创建用户
-          sudo dscl . -create /Users/macadmin
-          sudo dscl . -create /Users/macadmin UserShell /bin/bash
-          sudo dscl . -create /Users/macadmin RealName "Mac Admin"
-          sudo dscl . -create /Users/macadmin UniqueID 505
-          sudo dscl . -create /Users/macadmin PrimaryGroupID 20
-          sudo dscl . -create /Users/macadmin NFSHomeDirectory /Users/macadmin
-          
-          # 设置密码为 123456
-          sudo dscl . -passwd /Users/macadmin 123456
-          
-          # 赋予管理员权限
-          sudo dscl . -append /Groups/admin GroupMembership macadmin
-          echo "✅ 新用户 macadmin 创建成功，密码 123456"
+          echo "正在重置 runner 密码..."
+          sudo sysadminctl -resetPasswordFor runner -newPassword "MyStrongPass123!"
+          echo "✅ runner 密码已成功重置！"
 
-      # 2. 开启 VNC 并允许新用户登录
+      # 2. 禁止睡眠和屏保 (防止黑屏)
+      - name: Disable Sleep & Screensaver
+        run: |
+          sudo systemsetup -setcomputersleep Never
+          sudo systemsetup -setdisplaysleep Never
+          sudo defaults write /Library/Preferences/com.apple.screensaver loginWindowIdleTime 0
+          echo "✅ 已禁止自动黑屏"
+
+      # 3. 开启 VNC
       - name: Start VNC Server
         run: |
-          echo "正在配置 VNC..."
-          # 允许 macadmin 用户进行远程登录
+          # 重启屏幕共享服务
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-          -activate -configure -access -on -users macadmin -privs -all -restart -agent -menu
-          echo "✅ VNC 已允许 macadmin 登录"
+          -activate -configure -access -on -restart -agent -privs -all -allowAccessFor -allUsers
+          
+          # 设置 VNC 连接密码
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+          -configure -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw MyStrongPass123!
+          echo "✅ VNC 启动完毕"
 
-      # 3. 安装并启动 noVNC
+      # 4. 启动 noVNC
       - name: Start noVNC
         run: |
           git clone https://github.com/novnc/noVNC.git
           git clone https://github.com/novnc/websockify noVNC/utils/websockify
           ./noVNC/utils/novnc_proxy --vnc localhost:5900 --listen 6080 &
 
-      # 4. 启动 Cloudflare 隧道
+      # 5. 启动 Cloudflare
       - name: Start Cloudflare Tunnel
         run: |
           brew install cloudflared
@@ -55,12 +55,12 @@ jobs:
           sleep 10
           
           echo "========================================================"
-          echo "🔗 只能用下面这组账号登录，别用 runner 了！"
+          echo "🔗 只有这个链接能进，复制它："
           echo "--------------------------------------------------------"
           grep -o 'https://.*\.trycloudflare.com' tunnel.log | head -n 1
           echo "--------------------------------------------------------"
-          echo "👤 用户名: macadmin"
-          echo "🔑 密  码: 123456"
+          echo "👤 用户名: runner"
+          echo "🔑 密  码: MyStrongPass123!"
           echo "========================================================"
 
       - name: Keep Alive
