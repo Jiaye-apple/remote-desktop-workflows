@@ -1,5 +1,6 @@
 name: macOS VNC - CLOUDFLARE
 on:
+  push:
   workflow_dispatch
 
 jobs:
