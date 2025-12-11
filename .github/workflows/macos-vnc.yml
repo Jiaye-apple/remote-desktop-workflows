@@ -1,52 +1,58 @@
-name: Mac-Debug-NoToken
+name: Mac-Debug-Fix
 on: workflow_dispatch
 
 jobs:
   build:
     runs-on: macos-latest
-    # 设置最大运行时间（GitHub 限制）
-    timeout-minutes: 360 
+    timeout-minutes: 360
     
     steps:
       - name: Checkout
         uses: actions/checkout@v3
 
-      # 1. 开启 Mac 自带的屏幕共享 (VNC)
+      # 1. 开启 Mac VNC 服务
       - name: Start VNC Server
         run: |
-          echo "正在开启 VNC 服务..."
+          echo "正在开启 VNC..."
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
           -activate -configure -access -on -restart -agent -privs -all -allowAccessFor -allUsers
           
-          # 设置密码为 secret
+          # 设置密码
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
           -configure -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw secret
-          echo "✅ VNC 启动成功，密码: secret"
+          echo "✅ VNC 启动完毕"
 
-      # 2. 安装 noVNC (把 VNC 转成网页视频流)
-      - name: Install noVNC
+      # 2. 手动安装 noVNC (修复报错的关键步骤)
+      - name: Install & Start noVNC
         run: |
-          brew install novnc
-          # 启动转换器：把内部的 5900(VNC) 转发到 6080(网页)
-          /usr/local/opt/novnc/bin/novnc_proxy --vnc localhost:5900 --listen 6080 &
-          echo "✅ noVNC 转换服务已启动"
+          # 直接克隆官方仓库，不依赖 brew
+          git clone https://github.com/novnc/noVNC.git
+          
+          # noVNC 需要 websockify 才能工作，我们手动克隆进去
+          git clone https://github.com/novnc/websockify noVNC/utils/websockify
+          
+          # 启动代理：把 5900 (VNC) 转成 6080 (Web)
+          # 使用 & 符号让它在后台运行
+          ./noVNC/utils/novnc_proxy --vnc localhost:5900 --listen 6080 &
+          
+          echo "✅ noVNC (源码版) 已启动"
 
-      # 3. 启动 Cloudflare 隧道 (不需要 Token，直接穿透 6080 端口)
+      # 3. 启动 Cloudflare 隧道 (无需 Token)
       - name: Start Cloudflare Tunnel
         run: |
           brew install cloudflared
-          # 关键点：这里穿透的是 http 端口，而不是 tcp
+          # 穿透网页端口 6080
           cloudflared tunnel --url http://localhost:6080 > tunnel.log 2>&1 &
           
-          echo "正在请求 Cloudflare 分配免费网址..."
+          echo "正在生成链接..."
           sleep 10
           
           echo "========================================================"
-          echo "🎉 成功！请复制下面的链接，直接在浏览器打开："
+          echo "🎉 调试链接已生成！复制下方链接到浏览器："
           echo "--------------------------------------------------------"
           grep -o 'https://.*\.trycloudflare.com' tunnel.log | head -n 1
           echo "--------------------------------------------------------"
-          echo "🔑 网页上点击 Connect，密码输入: secret"
+          echo "🔑 密码: secret"
           echo "========================================================"
 
       # 4. 保持运行
