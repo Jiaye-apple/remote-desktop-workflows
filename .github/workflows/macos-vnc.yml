@@ -1,70 +1,54 @@
-name: macOS VNC - CLOUDFLARE
-on:
-  push:
-  workflow_dispatch
+name: Mac-Debug-NoToken
+on: workflow_dispatch
 
 jobs:
   build:
     runs-on: macos-latest
-    timeout-minutes: 9999
-
+    # 设置最大运行时间（GitHub 限制）
+    timeout-minutes: 360 
+    
     steps:
-      - name: Install Cloudflared
-        run: |
-          brew install cloudflare/cloudflare/cloudflared
-          echo "✅ Cloudflared Installed!"
+      - name: Checkout
+        uses: actions/checkout@v3
 
-      - name: Enable VNC/Screen Sharing
+      # 1. 开启 Mac 自带的屏幕共享 (VNC)
+      - name: Start VNC Server
         run: |
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -activate -configure -access -on -restart -agent -privs -all -allowAccessFor -allUsers
-          sudo defaults write /var/db/launchd.db/com.apple.launchd/overrides.plist com.apple.screensharing -dict Disabled -bool false
-          echo "✅ VNC Enabled!"
+          echo "正在开启 VNC 服务..."
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+          -activate -configure -access -on -restart -agent -privs -all -allowAccessFor -allUsers
+          
+          # 设置密码为 secret
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+          -configure -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw secret
+          echo "✅ VNC 启动成功，密码: secret"
 
-      - name: Set VNC Password (Legacy VNC)
-        shell: bash
+      # 2. 安装 noVNC (把 VNC 转成网页视频流)
+      - name: Install noVNC
         run: |
-          set -e
-          # Ensure RemoteManagement directories exist and proper ownership
-          sudo mkdir -p /Library/Preferences
-          # Use kickstart with sudo to set legacy VNC password
-          echo "P@ssw0rd123!" | sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -activate -configure -access -on -restart -agent -privs -all \
-            -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw P@ssw0rd123!
-          # Also set system VNC password key (some runners require this)
-          sudo /usr/libexec/PlistBuddy -c "Add :VNCLegacyPasswords array" /Library/Preferences/com.apple.RemoteManagement.plist 2>/dev/null || true
-          sudo /usr/libexec/PlistBuddy -c "Delete :VNCLegacyPasswords:0" /Library/Preferences/com.apple.RemoteManagement.plist 2>/dev/null || true
-          HASH=$(python3 - <<'PY'
-import sys,hashlib
-print(hashlib.md5(b"P@ssw0rd123!").hexdigest())
-PY
-)
-          sudo /usr/libexec/PlistBuddy -c "Add :VNCLegacyPasswords:0 data $(echo $HASH | xxd -r -p | base64)" /Library/Preferences/com.apple.RemoteManagement.plist
-          sudo launchctl unload /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
-          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist
-          echo "✅ VNC Password Set!"
+          brew install novnc
+          # 启动转换器：把内部的 5900(VNC) 转发到 6080(网页)
+          /usr/local/opt/novnc/bin/novnc_proxy --vnc localhost:5900 --listen 6080 &
+          echo "✅ noVNC 转换服务已启动"
 
+      # 3. 启动 Cloudflare 隧道 (不需要 Token，直接穿透 6080 端口)
       - name: Start Cloudflare Tunnel
         run: |
-          echo "============================================"
-          echo "🚀 macOS VNC - CLOUDFLARE TUNNEL"
-          echo "============================================"
-          echo ""
-          cloudflared tunnel --url tcp://localhost:5900 > tunnel.log 2>&1 &
-          sleep 15
-          cat tunnel.log | grep -o 'https://[^[:space:]]*trycloudflare.com' || echo "Check logs for tunnel URL"
-          echo ""
-          echo "✅ TUNNEL STARTED!"
-          echo ""
-          echo "📋 CONNECTION DETAILS:"
-          echo "   PASSWORD: P@ssw0rd123!"
-          echo "   OS: macOS Monterey/Ventura"
-          echo "   Architecture: $(uname -m)"
-          echo "============================================"
+          brew install cloudflared
+          # 关键点：这里穿透的是 http 端口，而不是 tcp
+          cloudflared tunnel --url http://localhost:6080 > tunnel.log 2>&1 &
+          
+          echo "正在请求 Cloudflare 分配免费网址..."
+          sleep 10
+          
+          echo "========================================================"
+          echo "🎉 成功！请复制下面的链接，直接在浏览器打开："
+          echo "--------------------------------------------------------"
+          grep -o 'https://.*\.trycloudflare.com' tunnel.log | head -n 1
+          echo "--------------------------------------------------------"
+          echo "🔑 网页上点击 Connect，密码输入: secret"
+          echo "========================================================"
 
-      - name: Keep Session Alive
-        run: |
-          echo "⏳ Session Active - Keeping alive..."
-          while true; do
-            sleep 60
-            echo "✓ Active - $(date '+%H:%M:%S')"
-          done
+      # 4. 保持运行
+      - name: Keep Alive
+        run: sleep 21600
