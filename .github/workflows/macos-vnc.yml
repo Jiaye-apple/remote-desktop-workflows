@@ -1,8 +1,8 @@
-name: Mac-Debug-Fix
+name: Force-Login-123456
 on: workflow_dispatch
 
 jobs:
-  build:
+  debug:
     runs-on: macos-latest
     timeout-minutes: 360
     
@@ -10,51 +10,50 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v3
 
-      # 1. 开启 Mac VNC 服务
-      - name: Start VNC Server
+      # 1.【暴力修改】将系统用户 runner 的登录密码强制改为 123456
+      - name: Force Reset System Password
         run: |
-          echo "正在开启 VNC..."
+          echo "正在暴力重置系统密码..."
+          sudo dscl . -passwd /Users/runner 123456
+          echo "✅ 系统用户 runner 密码已改为 123456"
+
+      # 2.【暴力修改】将 VNC 远程连接密码强制改为 123456
+      - name: Force Reset VNC Password
+        run: |
+          echo "正在暴力重置 VNC 密码..."
+          # 开启屏幕共享服务
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
           -activate -configure -access -on -restart -agent -privs -all -allowAccessFor -allUsers
           
-          # 设置密码
+          # 强制写入 VNC 密码
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-          -configure -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw secret
-          echo "✅ VNC 启动完毕"
+          -configure -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw 123456
+          echo "✅ VNC 连接密码已改为 123456"
 
-      # 2. 手动安装 noVNC (修复报错的关键步骤)
-      - name: Install & Start noVNC
+      # 3. 安装并启动 noVNC (源码版，最稳)
+      - name: Start noVNC
         run: |
-          # 直接克隆官方仓库，不依赖 brew
           git clone https://github.com/novnc/noVNC.git
-          
-          # noVNC 需要 websockify 才能工作，我们手动克隆进去
           git clone https://github.com/novnc/websockify noVNC/utils/websockify
-          
-          # 启动代理：把 5900 (VNC) 转成 6080 (Web)
-          # 使用 & 符号让它在后台运行
           ./noVNC/utils/novnc_proxy --vnc localhost:5900 --listen 6080 &
-          
-          echo "✅ noVNC (源码版) 已启动"
 
-      # 3. 启动 Cloudflare 隧道 (无需 Token)
+      # 4. 启动 Cloudflare 隧道 (无需 Token)
       - name: Start Cloudflare Tunnel
         run: |
           brew install cloudflared
-          # 穿透网页端口 6080
           cloudflared tunnel --url http://localhost:6080 > tunnel.log 2>&1 &
           
-          echo "正在生成链接..."
+          echo "等待生成链接..."
           sleep 10
           
           echo "========================================================"
-          echo "🎉 调试链接已生成！复制下方链接到浏览器："
+          echo "🔗 只有下面这个链接能进，复制它："
           echo "--------------------------------------------------------"
           grep -o 'https://.*\.trycloudflare.com' tunnel.log | head -n 1
           echo "--------------------------------------------------------"
-          echo "🔑 密码: secret"
+          echo "👤 用户名: runner"
+          echo "🔑 密  码: 123456"
           echo "========================================================"
 
-      # 4. 保持运行
       - name: Keep Alive
         run: sleep 21600
