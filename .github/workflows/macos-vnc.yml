@@ -1,7 +1,7 @@
 name: macOS VNC - CLOUDFLARE
 on:
   push:
-  workflow_dispatch:
+  workflow_dispatch
 
 jobs:
   build:
@@ -68,4 +68,3 @@ PY
             sleep 60
             echo "✓ Active - $(date '+%H:%M:%S')"
           done
-# Activated for manual run  
