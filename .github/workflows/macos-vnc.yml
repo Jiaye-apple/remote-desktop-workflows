@@ -1,4 +1,4 @@
-name: Force-Login-123456
+name: New-User-Login
 on: workflow_dispatch
 
 jobs:
@@ -10,48 +10,56 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v3
 
-      # 1.【暴力修改】将系统用户 runner 的登录密码强制改为 123456
-      - name: Force Reset System Password
+      # 1. 【核心】创建一个全新的管理员账户 (绕过 runner 账户限制)
+      - name: Create New Admin User
         run: |
-          echo "正在暴力重置系统密码..."
-          sudo dscl . -passwd /Users/runner 123456
-          echo "✅ 系统用户 runner 密码已改为 123456"
-
-      # 2.【暴力修改】将 VNC 远程连接密码强制改为 123456
-      - name: Force Reset VNC Password
-        run: |
-          echo "正在暴力重置 VNC 密码..."
-          # 开启屏幕共享服务
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-          -activate -configure -access -on -restart -agent -privs -all -allowAccessFor -allUsers
+          echo "正在创建新用户 macadmin..."
+          # 创建用户
+          sudo dscl . -create /Users/macadmin
+          sudo dscl . -create /Users/macadmin UserShell /bin/bash
+          sudo dscl . -create /Users/macadmin RealName "Mac Admin"
+          sudo dscl . -create /Users/macadmin UniqueID 505
+          sudo dscl . -create /Users/macadmin PrimaryGroupID 20
+          sudo dscl . -create /Users/macadmin NFSHomeDirectory /Users/macadmin
           
-          # 强制写入 VNC 密码
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-          -configure -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw 123456
-          echo "✅ VNC 连接密码已改为 123456"
+          # 设置密码为 123456
+          sudo dscl . -passwd /Users/macadmin 123456
+          
+          # 赋予管理员权限
+          sudo dscl . -append /Groups/admin GroupMembership macadmin
+          echo "✅ 新用户 macadmin 创建成功，密码 123456"
 
-      # 3. 安装并启动 noVNC (源码版，最稳)
+      # 2. 开启 VNC 并允许新用户登录
+      - name: Start VNC Server
+        run: |
+          echo "正在配置 VNC..."
+          # 允许 macadmin 用户进行远程登录
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+          -activate -configure -access -on -users macadmin -privs -all -restart -agent -menu
+          echo "✅ VNC 已允许 macadmin 登录"
+
+      # 3. 安装并启动 noVNC
       - name: Start noVNC
         run: |
           git clone https://github.com/novnc/noVNC.git
           git clone https://github.com/novnc/websockify noVNC/utils/websockify
           ./noVNC/utils/novnc_proxy --vnc localhost:5900 --listen 6080 &
 
-      # 4. 启动 Cloudflare 隧道 (无需 Token)
+      # 4. 启动 Cloudflare 隧道
       - name: Start Cloudflare Tunnel
         run: |
           brew install cloudflared
           cloudflared tunnel --url http://localhost:6080 > tunnel.log 2>&1 &
           
-          echo "等待生成链接..."
+          echo "生成链接中..."
           sleep 10
           
           echo "========================================================"
-          echo "🔗 只有下面这个链接能进，复制它："
+          echo "🔗 只能用下面这组账号登录，别用 runner 了！"
           echo "--------------------------------------------------------"
           grep -o 'https://.*\.trycloudflare.com' tunnel.log | head -n 1
           echo "--------------------------------------------------------"
-          echo "👤 用户名: runner"
+          echo "👤 用户名: macadmin"
           echo "🔑 密  码: 123456"
           echo "========================================================"
 
