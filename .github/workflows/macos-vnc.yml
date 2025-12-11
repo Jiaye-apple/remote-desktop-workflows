@@ -1,4 +1,4 @@
-name: macOS-Remote-Desktop-Fixed
+name: macOS-Remote-Desktop-Screenshot-Method
 on: workflow_dispatch
 
 jobs:
@@ -11,146 +11,118 @@ jobs:
         uses: actions/checkout@v3
 
       # 1. 禁止休眠
-      - name: Disable Sleep & Screensaver
+      - name: Disable Sleep
         run: |
           sudo systemsetup -setcomputersleep Never
           sudo systemsetup -setdisplaysleep Never
-          sudo defaults write /Library/Preferences/com.apple.screensaver loginWindowIdleTime 0
-          echo "✅ 已禁止休眠和屏保"
+          echo "✅ 已禁止休眠"
 
-      # 2. 【核心修复】授予屏幕录制权限
-      - name: Grant Screen Recording Permission
+      # 2. 安装依赖
+      - name: Install Dependencies
         run: |
-          echo "正在强制授予屏幕录制权限..."
-          
-          # 给 ARDAgent 添加屏幕录制权限
-          sudo sqlite3 /Library/Application\ Support/com.apple.TCC/TCC.db "INSERT or REPLACE INTO access VALUES('kTCCServiceScreenCapture','/System/Library/CoreServices/RemoteManagement/ARDAgent.app',0,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,1687825253);" 2>/dev/null || true
-          
-          # 给 ARDAgent 添加辅助功能权限
-          sudo sqlite3 /Library/Application\ Support/com.apple.TCC/TCC.db "INSERT or REPLACE INTO access VALUES('kTCCServiceAccessibility','/System/Library/CoreServices/RemoteManagement/ARDAgent.app',0,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,1687825253);" 2>/dev/null || true
-          
-          # 给 ARDAgent 添加后台事件权限
-          sudo sqlite3 /Library/Application\ Support/com.apple.TCC/TCC.db "INSERT or REPLACE INTO access VALUES('kTCCServicePostEvent','/System/Library/CoreServices/RemoteManagement/ARDAgent.app',0,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,1687825253);" 2>/dev/null || true
-          
-          # 重启权限服务
-          sudo killall -9 tccd 2>/dev/null || true
-          sleep 3
-          
-          echo "✅ 屏幕录制权限已授予"
+          brew install python@3.11 pillow
+          pip3 install flask pillow pyautogui
+          echo "✅ 依赖安装完成"
 
-      # 3. 启动 VNC 服务器
-      - name: Start VNC Server
+      # 3. 创建 Web 远程桌面服务器（使用截屏）
+      - name: Create Web Desktop Server
         run: |
-          VNC_PASSWORD="jerrylin03@"
-          echo "使用密码: $VNC_PASSWORD"
-          
-          # 启动屏幕共享服务
-          sudo launchctl enable system/com.apple.screensharing
-          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
-          
-          # 使用 kickstart 激活远程管理
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -activate -configure -access -on -restart -agent -privs -all -allowAccessFor -allUsers
-          
-          # 设置 VNC 密码
-          printf "%s" "$VNC_PASSWORD" | sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -configure -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw -
-          
-          # 重启服务
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -restart -agent
-          
-          echo "VNC_PASSWORD=$VNC_PASSWORD" >> $GITHUB_ENV
-          echo "✅ VNC 服务配置完成"
-          sleep 8
+          cat > desktop_server.py << 'EOF'
+from flask import Flask, render_template_string, Response, request
+import subprocess
+import time
+import base64
+import io
 
-      # 4. 验证权限和服务状态
-      - name: Verify Permissions and Service
-        run: |
-          echo "========== 检查权限状态 =========="
-          sudo sqlite3 /Library/Application\ Support/com.apple.TCC/TCC.db "SELECT service, client, allowed FROM access WHERE service LIKE '%Screen%' OR service LIKE '%Accessibility%';" 2>/dev/null || echo "无法读取 TCC 数据库"
-          
-          echo ""
-          echo "========== 检查 VNC 端口 =========="
-          for i in {1..15}; do
-            if sudo lsof -i :5900 | grep -q LISTEN; then
-              echo "✅ VNC 正在监听端口 5900"
-              sudo lsof -i :5900
-              break
-            else
-              echo "⏳ 等待 VNC 启动... ($i/15)"
-              sleep 2
-            fi
-          done
-          
-          echo ""
-          echo "========== ARDAgent 进程状态 =========="
-          ps aux | grep ARDAgent | grep -v grep
+app = Flask(__name__)
 
-      # 5. 备用方案：使用 x11vnc
-      - name: Fallback - Install and Start x11vnc
+HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>macOS Remote Desktop</title>
+    <style>
+        body { margin: 0; padding: 20px; background: #000; }
+        #screen { max-width: 100%; border: 2px solid #0f0; }
+        .controls { margin: 20px 0; }
+        button { padding: 10px 20px; margin: 5px; font-size: 16px; }
+    </style>
+</head>
+<body>
+    <h1 style="color: #0f0;">macOS Remote Desktop</h1>
+    <div class="controls">
+        <button onclick="refresh()">刷新屏幕</button>
+        <span style="color: #fff;">自动刷新: <span id="countdown">3</span>秒</span>
+    </div>
+    <img id="screen" src="/screenshot" alt="Desktop">
+    
+    <script>
+        let countdown = 3;
+        setInterval(() => {
+            countdown--;
+            if (countdown <= 0) {
+                refresh();
+                countdown = 3;
+            }
+            document.getElementById('countdown').textContent = countdown;
+        }, 1000);
+        
+        function refresh() {
+            document.getElementById('screen').src = '/screenshot?' + new Date().getTime();
+        }
+    </script>
+</body>
+</html>
+"""
+
+@app.route('/')
+def index():
+    return render_template_string(HTML)
+
+@app.route('/screenshot')
+def screenshot():
+    # 使用 macOS 的 screencapture 命令（不需要权限）
+    subprocess.run(['screencapture', '-x', '/tmp/screen.png'], check=True)
+    
+    with open('/tmp/screen.png', 'rb') as f:
+        img_data = f.read()
+    
+    return Response(img_data, mimetype='image/png')
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=8080)
+EOF
+          
+          echo "✅ Web 服务器代码已创建"
+
+      # 4. 启动 Web 桌面服务器
+      - name: Start Web Desktop Server
         run: |
-          echo "安装 x11vnc 作为备用方案..."
-          brew install x11vnc
-          
-          # 给 x11vnc 添加屏幕录制权限
-          sudo sqlite3 /Library/Application\ Support/com.apple.TCC/TCC.db "INSERT or REPLACE INTO access VALUES('kTCCServiceScreenCapture','/opt/homebrew/bin/x11vnc',0,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,1687825253);" 2>/dev/null || true
-          
-          sudo killall -9 tccd 2>/dev/null || true
-          sleep 2
-          
-          # 启动 x11vnc（无密码模式）
-          nohup x11vnc -display :0 -forever -shared -nopw -xkb -repeat -capslock -norc > x11vnc.log 2>&1 &
+          echo "正在启动 Web 桌面服务器..."
+          nohup python3 desktop_server.py > server.log 2>&1 &
           
           sleep 5
           
-          if pgrep x11vnc > /dev/null; then
-            echo "✅ x11vnc 已启动"
-            cat x11vnc.log | head -n 20
+          if lsof -i :8080 > /dev/null 2>&1; then
+            echo "✅ Web 服务器已启动在端口 8080"
           else
-            echo "⚠️  x11vnc 启动失败"
-          fi
-
-      # 6. 安装 noVNC
-      - name: Setup noVNC
-        run: |
-          echo "正在安装 noVNC..."
-          git clone --depth 1 https://github.com/novnc/noVNC.git
-          git clone --depth 1 https://github.com/novnc/websockify.git noVNC/utils/websockify
-          python3 -m pip install numpy --break-system-packages 2>/dev/null || pip3 install numpy
-          echo "✅ noVNC 安装完成"
-
-      # 7. 启动 noVNC
-      - name: Start noVNC
-        run: |
-          cd noVNC
-          nohup ./utils/novnc_proxy --vnc localhost:5900 --listen 6080 --web . > ../novnc.log 2>&1 &
-          
-          sleep 5
-          
-          if lsof -i :6080 > /dev/null 2>&1; then
-            echo "✅ noVNC 已启动在端口 6080"
-          else
-            echo "❌ noVNC 启动失败"
-            cat ../novnc.log
+            echo "❌ 服务器启动失败"
+            cat server.log
             exit 1
           fi
 
-      # 8. 启动 Cloudflare Tunnel
+      # 5. 启动 Cloudflare Tunnel
       - name: Start Cloudflare Tunnel
         run: |
-          echo "正在安装 cloudflared..."
           brew install cloudflared
+          nohup cloudflared tunnel --url http://localhost:8080 > tunnel.log 2>&1 &
           
-          echo "正在启动 Cloudflare 隧道..."
-          nohup cloudflared tunnel --url http://localhost:6080 > tunnel.log 2>&1 &
-          
-          echo "等待隧道建立..."
           sleep 20
           
           TUNNEL_URL=$(grep -o 'https://.*\.trycloudflare.com' tunnel.log | head -n 1)
           
           if [ -z "$TUNNEL_URL" ]; then
-            echo "❌ 未能获取隧道地址"
+            echo "❌ 获取隧道失败"
             cat tunnel.log
             exit 1
           fi
@@ -159,57 +131,26 @@ jobs:
           echo "🌐 远程桌面访问地址："
           echo "=========================================================="
           echo ""
-          echo "   $TUNNEL_URL/vnc.html"
+          echo "   $TUNNEL_URL"
           echo ""
           echo "=========================================================="
-          echo "🔑 连接方式："
-          echo "   方案1: 密码 jerrylin03@"
-          echo "   方案2: 直接点 Connect（无密码）"
+          echo "📖 使用说明："
+          echo "   1. 打开上面的链接"
+          echo "   2. 自动每3秒刷新屏幕"
+          echo "   3. 可以手动点击'刷新屏幕'按钮"
           echo "=========================================================="
           
           echo "TUNNEL_URL=$TUNNEL_URL" >> $GITHUB_ENV
 
-      # 9. 显示完整调试信息
-      - name: Debug Information
-        run: |
-          echo ""
-          echo "=========================================================="
-          echo "🔍 完整调试信息"
-          echo "=========================================================="
-          echo ""
-          echo "【权限状态】"
-          sudo sqlite3 /Library/Application\ Support/com.apple.TCC/TCC.db "SELECT * FROM access;" 2>/dev/null | grep -i "screen\|vnc\|ard" || echo "未找到相关权限"
-          echo ""
-          echo "【端口监听】"
-          sudo lsof -i :5900
-          lsof -i :6080
-          echo ""
-          echo "【VNC 进程】"
-          ps aux | grep -i "ard\|vnc\|x11vnc" | grep -v grep
-          echo ""
-          echo "【x11vnc 日志】"
-          cat x11vnc.log 2>/dev/null | tail -n 30 || echo "x11vnc 未运行"
-          echo "=========================================================="
-
-      # 10. 保持运行
-      - name: Keep Alive with Monitoring
+      # 6. 保持运行
+      - name: Keep Alive
         run: |
           echo "✅ 服务运行中..."
-          echo "🔗 访问: $TUNNEL_URL/vnc.html"
+          echo "🔗 访问: $TUNNEL_URL"
           
           for i in {1..360}; do
             sleep 60
-            
             if [ $((i % 10)) -eq 0 ]; then
-              echo "✅ [$i/360] 运行中"
-            fi
-            
-            # 自动重启服务
-            if ! pgrep -f novnc_proxy > /dev/null; then
-              cd noVNC && nohup ./utils/novnc_proxy --vnc localhost:5900 --listen 6080 --web . > ../novnc.log 2>&1 &
-            fi
-            
-            if ! pgrep -f cloudflared > /dev/null; then
-              nohup cloudflared tunnel --url http://localhost:6080 > tunnel.log 2>&1 &
+              echo "✅ [$i/360] 运行正常"
             fi
           done
