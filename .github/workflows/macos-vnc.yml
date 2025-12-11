@@ -1,156 +1,93 @@
-name: macOS-Remote-Desktop-Screenshot-Method
+name: macOS-Desktop-With-GUI
 on: workflow_dispatch
 
 jobs:
   desktop:
-    runs-on: macos-latest
+    runs-on: macos-13  # 使用 macOS 13（更稳定）
     timeout-minutes: 360
     
     steps:
       - name: Checkout
         uses: actions/checkout@v3
 
-      # 1. 禁止休眠
+      # 核心：启动图形界面
+      - name: Start GUI Session
+        run: |
+          echo "启动图形界面..."
+          
+          # 创建虚拟显示器
+          sudo /usr/bin/defaults write /Library/Preferences/com.apple.loginwindow "autoLoginUser" -string "runner"
+          
+          # 启动桌面会话
+          sudo launchctl load /System/Library/LaunchDaemons/com.apple.loginwindow.plist 2>/dev/null || true
+          
+          # 等待桌面启动
+          sleep 10
+          
+          echo "✅ 图形界面已启动"
+
+      # 禁止休眠
       - name: Disable Sleep
         run: |
           sudo systemsetup -setcomputersleep Never
           sudo systemsetup -setdisplaysleep Never
-          echo "✅ 已禁止休眠"
+          caffeinate -d &
 
-      # 2. 安装依赖
-      - name: Install Dependencies
+      # 安装 VNC 服务器
+      - name: Setup TightVNC Server
         run: |
-          brew install python@3.11 pillow
-          pip3 install flask pillow pyautogui
-          echo "✅ 依赖安装完成"
-
-      # 3. 创建 Web 远程桌面服务器（使用截屏）
-      - name: Create Web Desktop Server
-        run: |
-          cat > desktop_server.py << 'EOF'
-from flask import Flask, render_template_string, Response, request
-import subprocess
-import time
-import base64
-import io
-
-app = Flask(__name__)
-
-HTML = """
-<!DOCTYPE html>
-<html>
-<head>
-    <title>macOS Remote Desktop</title>
-    <style>
-        body { margin: 0; padding: 20px; background: #000; }
-        #screen { max-width: 100%; border: 2px solid #0f0; }
-        .controls { margin: 20px 0; }
-        button { padding: 10px 20px; margin: 5px; font-size: 16px; }
-    </style>
-</head>
-<body>
-    <h1 style="color: #0f0;">macOS Remote Desktop</h1>
-    <div class="controls">
-        <button onclick="refresh()">刷新屏幕</button>
-        <span style="color: #fff;">自动刷新: <span id="countdown">3</span>秒</span>
-    </div>
-    <img id="screen" src="/screenshot" alt="Desktop">
-    
-    <script>
-        let countdown = 3;
-        setInterval(() => {
-            countdown--;
-            if (countdown <= 0) {
-                refresh();
-                countdown = 3;
-            }
-            document.getElementById('countdown').textContent = countdown;
-        }, 1000);
-        
-        function refresh() {
-            document.getElementById('screen').src = '/screenshot?' + new Date().getTime();
-        }
-    </script>
-</body>
-</html>
-"""
-
-@app.route('/')
-def index():
-    return render_template_string(HTML)
-
-@app.route('/screenshot')
-def screenshot():
-    # 使用 macOS 的 screencapture 命令（不需要权限）
-    subprocess.run(['screencapture', '-x', '/tmp/screen.png'], check=True)
-    
-    with open('/tmp/screen.png', 'rb') as f:
-        img_data = f.read()
-    
-    return Response(img_data, mimetype='image/png')
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8080)
-EOF
+          # 使用 TightVNC（第三方，权限要求更低）
+          brew install --cask tigervnc-viewer || brew install tiger-vnc
           
-          echo "✅ Web 服务器代码已创建"
-
-      # 4. 启动 Web 桌面服务器
-      - name: Start Web Desktop Server
-        run: |
-          echo "正在启动 Web 桌面服务器..."
-          nohup python3 desktop_server.py > server.log 2>&1 &
+          # 或者用 RealVNC
+          curl -O https://downloads.realvnc.com/download/file/vnc.files/VNC-Server-7.12.1-MacOSX-universal.pkg
+          sudo installer -pkg VNC-Server-7.12.1-MacOSX-universal.pkg -target /
+          
+          # 设置 VNC 密码
+          mkdir -p ~/.vnc
+          echo "jerrylin03@" | vncpasswd -f > ~/.vnc/passwd
+          chmod 600 ~/.vnc/passwd
+          
+          # 启动 VNC
+          vncserver :1 -geometry 1920x1080 -depth 24 &
           
           sleep 5
-          
-          if lsof -i :8080 > /dev/null 2>&1; then
-            echo "✅ Web 服务器已启动在端口 8080"
-          else
-            echo "❌ 服务器启动失败"
-            cat server.log
-            exit 1
-          fi
+          echo "✅ VNC 服务器已启动"
 
-      # 5. 启动 Cloudflare Tunnel
-      - name: Start Cloudflare Tunnel
+      # 或者：使用 Chrome Remote Desktop
+      - name: Setup Chrome Remote Desktop
+        run: |
+          # 下载 Chrome Remote Desktop
+          curl -O https://dl.google.com/chrome-remote-desktop/chromeremotedesktop.dmg
+          
+          # 安装
+          hdiutil attach chromeremotedesktop.dmg
+          sudo installer -pkg /Volumes/Chrome\ Remote\ Desktop/Chrome\ Remote\ Desktop.pkg -target /
+          
+          # 配置（需要你的 Chrome Remote Desktop PIN）
+          echo "访问 https://remotedesktop.google.com/headless"
+          echo "获取授权码并在下次运行时提供"
+
+      # 启动 noVNC
+      - name: Start noVNC
+        run: |
+          git clone --depth 1 https://github.com/novnc/noVNC.git
+          git clone --depth 1 https://github.com/novnc/websockify.git noVNC/utils/websockify
+          pip3 install numpy
+          
+          cd noVNC
+          ./utils/novnc_proxy --vnc localhost:5901 --listen 6080 &
+          
+          sleep 5
+
+      # Cloudflare Tunnel
+      - name: Cloudflare Tunnel
         run: |
           brew install cloudflared
-          nohup cloudflared tunnel --url http://localhost:8080 > tunnel.log 2>&1 &
+          cloudflared tunnel --url http://localhost:6080 > tunnel.log 2>&1 &
           
           sleep 20
-          
-          TUNNEL_URL=$(grep -o 'https://.*\.trycloudflare.com' tunnel.log | head -n 1)
-          
-          if [ -z "$TUNNEL_URL" ]; then
-            echo "❌ 获取隧道失败"
-            cat tunnel.log
-            exit 1
-          fi
-          
-          echo "=========================================================="
-          echo "🌐 远程桌面访问地址："
-          echo "=========================================================="
-          echo ""
-          echo "   $TUNNEL_URL"
-          echo ""
-          echo "=========================================================="
-          echo "📖 使用说明："
-          echo "   1. 打开上面的链接"
-          echo "   2. 自动每3秒刷新屏幕"
-          echo "   3. 可以手动点击'刷新屏幕'按钮"
-          echo "=========================================================="
-          
-          echo "TUNNEL_URL=$TUNNEL_URL" >> $GITHUB_ENV
+          grep -o 'https://.*\.trycloudflare.com' tunnel.log
 
-      # 6. 保持运行
       - name: Keep Alive
-        run: |
-          echo "✅ 服务运行中..."
-          echo "🔗 访问: $TUNNEL_URL"
-          
-          for i in {1..360}; do
-            sleep 60
-            if [ $((i % 10)) -eq 0 ]; then
-              echo "✅ [$i/360] 运行正常"
-            fi
-          done
+        run: sleep 21600
