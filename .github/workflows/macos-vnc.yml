@@ -1,93 +1,207 @@
-name: macOS-Desktop-With-GUI
+name: macOS-Remote-Desktop-Working
 on: workflow_dispatch
 
 jobs:
   desktop:
-    runs-on: macos-13  # 使用 macOS 13（更稳定）
+    runs-on: macos-latest  # 使用最新版本
     timeout-minutes: 360
     
     steps:
       - name: Checkout
         uses: actions/checkout@v3
 
-      # 核心：启动图形界面
-      - name: Start GUI Session
-        run: |
-          echo "启动图形界面..."
-          
-          # 创建虚拟显示器
-          sudo /usr/bin/defaults write /Library/Preferences/com.apple.loginwindow "autoLoginUser" -string "runner"
-          
-          # 启动桌面会话
-          sudo launchctl load /System/Library/LaunchDaemons/com.apple.loginwindow.plist 2>/dev/null || true
-          
-          # 等待桌面启动
-          sleep 10
-          
-          echo "✅ 图形界面已启动"
-
-      # 禁止休眠
+      # 1. 禁止休眠
       - name: Disable Sleep
         run: |
           sudo systemsetup -setcomputersleep Never
           sudo systemsetup -setdisplaysleep Never
           caffeinate -d &
+          echo "✅ 已禁止休眠"
 
-      # 安装 VNC 服务器
-      - name: Setup TightVNC Server
+      # 2. 强制启用屏幕共享和远程管理
+      - name: Enable Screen Sharing
         run: |
-          # 使用 TightVNC（第三方，权限要求更低）
-          brew install --cask tigervnc-viewer || brew install tiger-vnc
+          echo "启用屏幕共享..."
           
-          # 或者用 RealVNC
-          curl -O https://downloads.realvnc.com/download/file/vnc.files/VNC-Server-7.12.1-MacOSX-universal.pkg
-          sudo installer -pkg VNC-Server-7.12.1-MacOSX-universal.pkg -target /
+          # 方法1：通过 launchctl
+          sudo launchctl enable system/com.apple.screensharing
+          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
           
-          # 设置 VNC 密码
-          mkdir -p ~/.vnc
-          echo "jerrylin03@" | vncpasswd -f > ~/.vnc/passwd
-          chmod 600 ~/.vnc/passwd
+          # 方法2：通过系统偏好设置
+          sudo defaults write /var/db/launchd.db/com.apple.launchd/overrides.plist com.apple.screensharing -dict Disabled -bool false
           
-          # 启动 VNC
-          vncserver :1 -geometry 1920x1080 -depth 24 &
+          # 方法3：通过 kickstart（最强力）
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate \
+            -configure -allowAccessFor -allUsers -privs -all \
+            -configure -clientopts -setvnclegacy -vnclegacy yes \
+            -configure -access -on \
+            -restart -agent -console
           
           sleep 5
-          echo "✅ VNC 服务器已启动"
+          echo "✅ 屏幕共享已启用"
 
-      # 或者：使用 Chrome Remote Desktop
-      - name: Setup Chrome Remote Desktop
+      # 3. 关闭所有安全限制（关键步骤）
+      - name: Disable Security Restrictions
         run: |
-          # 下载 Chrome Remote Desktop
-          curl -O https://dl.google.com/chrome-remote-desktop/chromeremotedesktop.dmg
+          echo "关闭安全限制..."
           
-          # 安装
-          hdiutil attach chromeremotedesktop.dmg
-          sudo installer -pkg /Volumes/Chrome\ Remote\ Desktop/Chrome\ Remote\ Desktop.pkg -target /
+          # 禁用防火墙
+          sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setglobalstate off
           
-          # 配置（需要你的 Chrome Remote Desktop PIN）
-          echo "访问 https://remotedesktop.google.com/headless"
-          echo "获取授权码并在下次运行时提供"
+          # 禁用 Gatekeeper
+          sudo spctl --master-disable
+          
+          # 给所有应用授予屏幕录制权限
+          sudo tccutil reset ScreenCapture 2>/dev/null || true
+          sudo tccutil reset SystemPolicyAllFiles 2>/dev/null || true
+          
+          echo "✅ 安全限制已关闭"
 
-      # 启动 noVNC
-      - name: Start noVNC
+      # 4. 设置 VNC 无密码访问
+      - name: Configure VNC No Password
+        run: |
+          echo "配置 VNC 无密码访问..."
+          
+          # 设置为无密码模式
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -configure -clientopts -setvnclegacy -vnclegacy yes
+          
+          # 允许所有用户访问
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -configure -allowAccessFor -allUsers -privs -all
+          
+          # 重启服务
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -restart -agent -console
+          
+          sleep 3
+          echo "✅ VNC 配置完成（无密码模式）"
+
+      # 5. 验证 VNC 服务
+      - name: Verify VNC Service
+        run: |
+          echo "========== 检查 VNC 服务 =========="
+          
+          # 检查端口
+          if sudo lsof -i :5900 | grep -q LISTEN; then
+            echo "✅ VNC 端口 5900 正在监听"
+            sudo lsof -i :5900
+          else
+            echo "❌ VNC 端口未监听"
+            echo "尝试手动启动..."
+            sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -restart -agent -console
+            sleep 5
+            sudo lsof -i :5900 || echo "仍然无法启动"
+          fi
+          
+          echo ""
+          echo "========== VNC 进程状态 =========="
+          ps aux | grep -i "ARDAgent\|screensharing" | grep -v grep || echo "未找到进程"
+          
+          echo ""
+          echo "========== 系统日志（查找错误）=========="
+          log show --predicate 'process == "ARDAgent"' --last 2m 2>/dev/null | tail -n 20 || echo "无法读取日志"
+
+      # 6. 安装 noVNC
+      - name: Setup noVNC
         run: |
           git clone --depth 1 https://github.com/novnc/noVNC.git
           git clone --depth 1 https://github.com/novnc/websockify.git noVNC/utils/websockify
-          pip3 install numpy
-          
+          pip3 install numpy --break-system-packages 2>/dev/null || pip3 install numpy
+          echo "✅ noVNC 已安装"
+
+      # 7. 启动 noVNC（无密码模式）
+      - name: Start noVNC
+        run: |
           cd noVNC
-          ./utils/novnc_proxy --vnc localhost:5901 --listen 6080 &
+          nohup ./utils/novnc_proxy --vnc localhost:5900 --listen 6080 --web . > ../novnc.log 2>&1 &
           
           sleep 5
+          
+          if lsof -i :6080 > /dev/null 2>&1; then
+            echo "✅ noVNC 已启动"
+          else
+            echo "❌ noVNC 启动失败"
+            cat ../novnc.log
+            exit 1
+          fi
 
-      # Cloudflare Tunnel
-      - name: Cloudflare Tunnel
+      # 8. 启动 Cloudflare Tunnel
+      - name: Start Cloudflare Tunnel
         run: |
           brew install cloudflared
-          cloudflared tunnel --url http://localhost:6080 > tunnel.log 2>&1 &
+          nohup cloudflared tunnel --url http://localhost:6080 > tunnel.log 2>&1 &
           
           sleep 20
-          grep -o 'https://.*\.trycloudflare.com' tunnel.log
+          
+          TUNNEL_URL=$(grep -o 'https://.*\.trycloudflare.com' tunnel.log | head -n 1)
+          
+          if [ -z "$TUNNEL_URL" ]; then
+            echo "❌ 获取隧道失败"
+            cat tunnel.log
+            exit 1
+          fi
+          
+          echo "=========================================================="
+          echo "🌐 远程桌面访问地址："
+          echo "=========================================================="
+          echo ""
+          echo "   $TUNNEL_URL/vnc.html"
+          echo ""
+          echo "=========================================================="
+          echo "🔑 连接方式："
+          echo "   直接点击 Connect 按钮（无密码）"
+          echo "=========================================================="
+          echo ""
+          echo "⚠️  如果提示认证失败："
+          echo "   说明 GitHub Actions 的 macOS 屏幕录制权限被系统锁死"
+          echo "   这是 GitHub 的安全限制，无法绕过"
+          echo "=========================================================="
+          
+          echo "TUNNEL_URL=$TUNNEL_URL" >> $GITHUB_ENV
 
+      # 9. 显示完整诊断信息
+      - name: Full Diagnostic
+        run: |
+          echo ""
+          echo "=========================================================="
+          echo "📊 完整诊断信息"
+          echo "=========================================================="
+          echo ""
+          echo "【macOS 版本】"
+          sw_vers
+          echo ""
+          echo "【当前用户】"
+          whoami
+          id
+          echo ""
+          echo "【屏幕共享配置】"
+          sudo defaults read /Library/Preferences/com.apple.ScreenSharing 2>/dev/null || echo "无配置文件"
+          echo ""
+          echo "【远程管理状态】"
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -status
+          echo ""
+          echo "【所有监听端口】"
+          sudo lsof -i -P | grep LISTEN | grep -E "5900|6080"
+          echo ""
+          echo "【noVNC 日志】"
+          cat novnc.log 2>/dev/null | tail -n 30
+          echo "=========================================================="
+
+      # 10. 保持运行
       - name: Keep Alive
-        run: sleep 21600
+        run: |
+          echo "✅ 服务运行中..."
+          echo "🔗 访问: $TUNNEL_URL/vnc.html"
+          echo ""
+          echo "💡 提示：如果连接后看到黑屏或认证失败"
+          echo "   这是正常的 - GitHub Actions 限制了屏幕访问"
+          echo "   建议改用云服务商的 macOS 实例"
+          
+          for i in {1..360}; do
+            sleep 60
+            if [ $((i % 10)) -eq 0 ]; then
+              echo "✅ [$i/360] 运行中"
+            fi
+          done
