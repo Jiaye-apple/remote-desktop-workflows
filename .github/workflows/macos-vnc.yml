@@ -67,3 +67,4 @@ PY
             sleep 60
             echo "✓ Active - $(date '+%H:%M:%S')"
           done
+# Activated for manual run  
