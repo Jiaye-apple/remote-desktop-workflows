@@ -1,38 +1,53 @@
-name: Mac-Debug-Final-Fix
+name: Mac-NewUser-Fix
 on: workflow_dispatch
 
 jobs:
   debug-job:
-    # 🔴 关键修改：强制使用 macOS 12 (Monterey)
-    # 只有这个旧版本允许我们用 kickstart 命令设置 VNC 密码
-    runs-on: macos-12
+    # 使用 macOS 13 (Ventura)，这是目前能用的最稳定的版本
+    runs-on: macos-13
     timeout-minutes: 360
     
     steps:
       - name: Checkout
         uses: actions/checkout@v3
 
-      # 1. 启动 VNC (在 macOS 12 上这行命令是有效的)
-      - name: Start VNC
+      # 1.【核心大招】创建一个新的管理员账户 (绕过 runner 账户锁死的问题)
+      - name: Create New Admin User
         run: |
-          echo "正在启动 VNC 服务..."
+          echo "正在创建新用户 adminuser..."
+          # 使用 sysadminctl 工具创建用户 (比 dscl 更高级，不容易报错)
+          sudo sysadminctl -addUser adminuser -fullName "Admin User" -password "123456" -admin
+          echo "✅ 新管理员 adminuser 创建成功，密码: 123456"
+
+      # 2. 禁止睡眠 (防止黑屏)
+      - name: Disable Sleep
+        run: |
+          sudo systemsetup -setcomputersleep Never
+          sudo systemsetup -setdisplaysleep Never
+          echo "✅ 已禁止休眠"
+
+      # 3. 启动 VNC 并允许新用户登录
+      - name: Start VNC Server
+        run: |
+          echo "正在配置 VNC..."
+          # 激活服务
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
           -activate -configure -access -on -restart -agent -privs -all -allowAccessFor -allUsers
           
-          # 设置密码 123456 (macOS 12 允许这么做)
+          # 【重点】特别允许 adminuser 访问
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-          -configure -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw 123456
+          -configure -users adminuser -access -on -privs -all
           
-          echo "✅ VNC 启动成功"
+          echo "✅ VNC 已启动，允许 adminuser 登录"
 
-      # 2. 安装 noVNC (转网页版)
+      # 4. 安装 noVNC (转网页版)
       - name: Install noVNC
         run: |
           git clone --depth 1 https://github.com/novnc/noVNC.git
           git clone --depth 1 https://github.com/novnc/websockify noVNC/utils/websockify
           ./noVNC/utils/novnc_proxy --vnc localhost:5900 --listen 6080 &
 
-      # 3. 启动 Cloudflare (免费通道)
+      # 5. 启动 Cloudflare
       - name: Start Cloudflare Tunnel
         run: |
           brew install cloudflared
@@ -42,12 +57,13 @@ jobs:
           sleep 10
           
           echo "========================================================"
-          echo "🎉 调试链接 (macOS 12 版) 已生成："
+          echo "🎉 链接已生成！请务必使用下面的账号登录："
           echo "--------------------------------------------------------"
           grep -o 'https://.*\.trycloudflare.com' tunnel.log | head -n 1
           echo "--------------------------------------------------------"
-          echo "🔑 密码: 123456"
-          echo "👤 用户名: (留空)"
+          echo "👤 用户名 (Username): adminuser"
+          echo "🔑 密  码 (Password): 123456"
+          echo "⚠️ 注意：不要用默认的 runner，一定要填 adminuser！"
           echo "========================================================"
 
       - name: Keep Alive
