@@ -1,4 +1,4 @@
-name: macOS-Remote-Desktop-Fixed
+name: macOS-Remote-Desktop-Final-Fix
 on: workflow_dispatch
 
 jobs:
@@ -11,109 +11,138 @@ jobs:
         uses: actions/checkout@v3
 
       # 1. 禁止休眠
-      - name: Disable Sleep & Screensaver
+      - name: Disable Sleep
         run: |
           sudo systemsetup -setcomputersleep Never
           sudo systemsetup -setdisplaysleep Never
           sudo defaults write /Library/Preferences/com.apple.screensaver loginWindowIdleTime 0
-          echo "✅ 已禁止休眠和屏保"
+          echo "✅ 已禁止休眠"
 
-      # 2. 使用更可靠的方式启动 VNC（关键修复）
-      - name: Start VNC Server - Method 1
+      # 2. 授予屏幕录制权限（关键修复）
+      - name: Grant Screen Recording Permission
+        run: |
+          echo "正在授予屏幕录制权限..."
+          
+          # 添加 ARDAgent 到屏幕录制白名单
+          sudo sqlite3 /Library/Application\ Support/com.apple.TCC/TCC.db "INSERT or REPLACE INTO access VALUES('kTCCServiceScreenCapture','com.apple.RemoteDesktop',0,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,1687825253);" 2>/dev/null || true
+          
+          sudo sqlite3 /Library/Application\ Support/com.apple.TCC/TCC.db "INSERT or REPLACE INTO access VALUES('kTCCServicePostEvent','com.apple.RemoteDesktop',0,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,1687825253);" 2>/dev/null || true
+          
+          # 重启 TCC 服务
+          sudo killall -9 tccd 2>/dev/null || true
+          sleep 2
+          
+          echo "✅ 权限授予完成"
+
+      # 3. 启动屏幕共享（使用系统服务）
+      - name: Enable Screen Sharing
         run: |
           VNC_PASSWORD="jerrylin03@"
           echo "使用密码: $VNC_PASSWORD"
           
-          # 方法1: 直接启动屏幕共享
+          # 方法1: 启用系统屏幕共享
           sudo launchctl enable system/com.apple.screensharing
+          sudo defaults write /var/db/launchd.db/com.apple.launchd/overrides.plist com.apple.screensharing -dict Disabled -bool false
           sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
           
-          # 方法2: 使用 kickstart 激活
+          # 方法2: 使用 kickstart
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -activate -configure -access -on -restart -agent -privs -all -allowAccessFor -allUsers
+            -activate -configure -access -on -users runner -privs -all -restart -agent -menu
           
-          # 设置 VNC 密码 - 使用多种方法确保成功
-          # 方法A: 标准方式
-          printf "%s" "$VNC_PASSWORD" | sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -configure -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw -
-          
-          # 方法B: 创建密码文件
+          # 设置 VNC 密码（使用文件方式）
           sudo mkdir -p /Library/Preferences/com.apple.VNCSettings
-          echo "$VNC_PASSWORD" | sudo tee /Library/Preferences/com.apple.VNCSettings/VNCPassword.txt > /dev/null
+          echo -n "$VNC_PASSWORD" | sudo tee /Library/Preferences/com.apple.VNCSettings/.VNCpasswd > /dev/null
           
-          # 重启服务
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -restart -agent
+          # 通过 kickstart 设置密码
+          printf "%s" "$VNC_PASSWORD" | sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -configure -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw - 2>/dev/null || true
+          
+          # 设置无需密码（备用方案）
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -configure -allowAccessFor -allUsers -privs -all
+          
+          sleep 5
           
           echo "VNC_PASSWORD=$VNC_PASSWORD" >> $GITHUB_ENV
-          echo "✅ VNC 服务配置完成"
-          sleep 8
+          echo "✅ 屏幕共享已启动"
 
-      # 3. 验证 VNC 端口
-      - name: Verify VNC Port
+      # 4. 验证并显示 VNC 状态
+      - name: Verify VNC Service
         run: |
-          echo "检查 VNC 端口 5900..."
-          for i in {1..15}; do
-            if sudo lsof -i :5900 | grep -q LISTEN; then
-              echo "✅ VNC 正在监听端口 5900"
-              sudo lsof -i :5900
-              break
-            else
-              echo "⏳ 等待 VNC 启动... ($i/15)"
-              sleep 2
-            fi
-          done
+          echo "检查 VNC 服务状态..."
           
-          # 显示 VNC 相关进程
+          # 检查端口
+          if sudo lsof -i :5900 | grep -q LISTEN; then
+            echo "✅ VNC 端口 5900 正在监听"
+            sudo lsof -i :5900
+          else
+            echo "⚠️  VNC 端口未监听，尝试手动启动..."
+            sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -restart -agent -console
+            sleep 3
+          fi
+          
+          # 检查进程
           echo ""
           echo "VNC 相关进程:"
-          ps aux | grep -i "ard\|vnc\|screen" | grep -v grep || echo "未找到 VNC 进程"
+          ps aux | grep -i "ARDAgent\|screensharing" | grep -v grep
+          
+          # 显示 TCC 权限
+          echo ""
+          echo "屏幕录制权限状态:"
+          sudo sqlite3 /Library/Application\ Support/com.apple.TCC/TCC.db "SELECT * FROM access WHERE service='kTCCServiceScreenCapture';" 2>/dev/null || echo "无法读取权限数据库"
 
-      # 4. 安装 noVNC（使用无密码模式）
-      - name: Setup noVNC - No Auth Mode
+      # 5. 使用 x11vnc 作为备用方案（更可靠）
+      - name: Install and Start x11vnc
         run: |
-          echo "正在安装 noVNC..."
+          echo "安装 x11vnc（备用 VNC 服务器）..."
+          brew install x11vnc
+          
+          # 启动 x11vnc（无密码模式更稳定）
+          nohup x11vnc -display :0 -forever -shared -nopw -xkb -repeat -capslock > x11vnc.log 2>&1 &
+          
+          sleep 5
+          
+          if pgrep x11vnc > /dev/null; then
+            echo "✅ x11vnc 已启动"
+            cat x11vnc.log | head -n 20
+          else
+            echo "⚠️  x11vnc 启动失败，使用系统 VNC"
+          fi
+
+      # 6. 安装并启动 noVNC
+      - name: Setup and Start noVNC
+        run: |
+          echo "安装 noVNC..."
           git clone --depth 1 https://github.com/novnc/noVNC.git
           git clone --depth 1 https://github.com/novnc/websockify.git noVNC/utils/websockify
-          
-          # 安装依赖
           python3 -m pip install numpy --break-system-packages 2>/dev/null || pip3 install numpy
           
-          echo "✅ noVNC 安装完成"
-
-      # 5. 启动 noVNC（关键：使用 --web 参数简化认证）
-      - name: Start noVNC
-        run: |
+          echo "启动 noVNC..."
           cd noVNC
-          # 使用 --web 参数，让 noVNC 自动处理认证
           nohup ./utils/novnc_proxy --vnc localhost:5900 --listen 6080 --web . > ../novnc.log 2>&1 &
           
           sleep 5
           
           if lsof -i :6080 > /dev/null 2>&1; then
-            echo "✅ noVNC 已启动在端口 6080"
+            echo "✅ noVNC 已启动"
           else
-            echo "❌ noVNC 启动失败，查看日志:"
+            echo "❌ noVNC 启动失败"
             cat ../novnc.log
             exit 1
           fi
 
-      # 6. 启动 Cloudflare Tunnel
+      # 7. 启动 Cloudflare Tunnel
       - name: Start Cloudflare Tunnel
         run: |
-          echo "正在安装 cloudflared..."
           brew install cloudflared
-          
-          echo "正在启动 Cloudflare 隧道..."
           nohup cloudflared tunnel --url http://localhost:6080 > tunnel.log 2>&1 &
           
-          echo "等待隧道建立..."
           sleep 20
           
           TUNNEL_URL=$(grep -o 'https://.*\.trycloudflare.com' tunnel.log | head -n 1)
           
           if [ -z "$TUNNEL_URL" ]; then
-            echo "❌ 未能获取隧道地址"
-            cat tunnel.log
+            echo "❌ 获取隧道地址失败"
             exit 1
           fi
           
@@ -121,94 +150,70 @@ jobs:
           echo "🌐 远程桌面访问地址："
           echo "=========================================================="
           echo ""
-          echo "   $TUNNEL_URL"
+          echo "   $TUNNEL_URL/vnc.html"
           echo ""
           echo "=========================================================="
-          echo "🔑 VNC 密码: $VNC_PASSWORD"
-          echo "=========================================================="
-          echo ""
-          echo "📖 使用说明："
-          echo "   1. 复制上面的链接在浏览器打开"
+          echo "🔑 连接方式："
+          echo "   1. 打开上面的链接"
           echo "   2. 点击 'Connect' 按钮"
-          echo "   3. 在密码框输入: $VNC_PASSWORD"
-          echo "   4. 用户名留空！"
+          echo "   3. 密码: jerrylin03@"
+          echo "   4. 如果密码不对，留空直接连接（无密码模式）"
           echo "=========================================================="
           echo ""
-          echo "🔧 如果还是提示密码错误，尝试以下密码："
-          echo "   - 123456"
-          echo "   - (留空，直接点 Connect)"
-          echo "=========================================================="
-          
           echo "TUNNEL_URL=$TUNNEL_URL" >> $GITHUB_ENV
 
-      # 7. 尝试另一种 VNC 配置（备用方案）
-      - name: Alternative VNC Setup
+      # 8. 创建自动跳转页面
+      - name: Create Auto-Redirect Page
         run: |
-          echo "执行备用 VNC 配置..."
+          cat > index.html << 'EOF'
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta http-equiv="refresh" content="0; url=./vnc.html">
+    <title>正在跳转...</title>
+</head>
+<body>
+    <h2>正在跳转到远程桌面...</h2>
+    <p>如果没有自动跳转，请<a href="./vnc.html">点击这里</a></p>
+</body>
+</html>
+EOF
           
-          # 使用系统偏好设置启用屏幕共享
-          sudo defaults write /var/db/launchd.db/com.apple.launchd/overrides.plist com.apple.screensharing -dict Disabled -bool false
-          
-          # 再次设置密码
-          echo "jerrylin03@" | sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -configure -clientopts -setvnclegacy -vnclegacy yes -setvncpw 2>/dev/null || true
-          
-          # 确保服务运行
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -restart -agent
-          
-          sleep 3
-          echo "✅ 备用配置完成"
-
-      # 8. 显示详细的连接信息和调试信息
-      - name: Connection Info & Debug
-        run: |
-          echo ""
-          echo "=========================================================="
-          echo "🔗 最终连接信息"
-          echo "=========================================================="
-          echo "访问链接: $TUNNEL_URL"
-          echo "VNC 密码: $VNC_PASSWORD"
-          echo ""
-          echo "如果密码不对，请尝试："
-          echo "  1. 直接点 Connect（不输入密码）"
-          echo "  2. 输入: jerrylin03@"
-          echo "  3. 输入: 123456"
-          echo "=========================================================="
-          echo ""
-          echo "📊 端口监听状态:"
-          sudo lsof -i :5900 || echo "端口 5900 未监听"
-          lsof -i :6080 || echo "端口 6080 未监听"
-          echo ""
-          echo "📋 noVNC 日志:"
-          cat novnc.log | head -n 20
-          echo "=========================================================="
+          cp index.html noVNC/
+          echo "✅ 已创建自动跳转页面"
 
       # 9. 保持运行并监控
-      - name: Keep Alive with Monitoring
+      - name: Keep Alive
         run: |
-          echo "✅ 服务运行中，开始监控..."
+          echo "✅ 服务运行中..."
           echo "🔗 访问链接: $TUNNEL_URL"
-          echo "🔑 密码: $VNC_PASSWORD"
+          echo "🔗 直接连接: $TUNNEL_URL/vnc.html"
+          echo ""
+          echo "💡 如果连接失败，尝试以下操作："
+          echo "   1. 清除浏览器缓存"
+          echo "   2. 使用无痕模式打开"
+          echo "   3. 密码输入: jerrylin03@"
+          echo "   4. 或者留空密码直接连接"
           
+          # 持续监控
           for i in {1..360}; do
             sleep 60
             
-            # 每10分钟显示一次状态
             if [ $((i % 10)) -eq 0 ]; then
-              echo "✅ [$i/360] 服务运行正常 (已运行 $i 分钟)"
-              echo "🔗 链接: $TUNNEL_URL"
-            fi
-            
-            # 检查并重启服务
-            if ! pgrep -f novnc_proxy > /dev/null; then
-              echo "⚠️  noVNC 重启中..."
-              cd noVNC && nohup ./utils/novnc_proxy --vnc localhost:5900 --listen 6080 --web . > ../novnc.log 2>&1 &
-            fi
-            
-            if ! pgrep -f cloudflared > /dev/null; then
-              echo "⚠️  Cloudflare 重启中..."
-              nohup cloudflared tunnel --url http://localhost:6080 > tunnel.log 2>&1 &
-              sleep 10
-              grep -o 'https://.*\.trycloudflare.com' tunnel.log | head -n 1
+              echo "✅ [$i/360] 运行正常"
+              
+              # 检查服务状态
+              if ! pgrep -f novnc_proxy > /dev/null; then
+                echo "⚠️  重启 noVNC..."
+                cd noVNC && nohup ./utils/novnc_proxy --vnc localhost:5900 --listen 6080 --web . > ../novnc.log 2>&1 &
+              fi
+              
+              if ! pgrep cloudflared > /dev/null; then
+                echo "⚠️  重启 Cloudflare..."
+                nohup cloudflared tunnel --url http://localhost:6080 > tunnel.log 2>&1 &
+                sleep 10
+                grep -o 'https://.*\.trycloudflare.com' tunnel.log | head -n 1
+              fi
             fi
           done
