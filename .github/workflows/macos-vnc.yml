@@ -1,4 +1,4 @@
-name: Build-And-Play-Mac
+name: Build-Run-Fix
 on: workflow_dispatch
 
 jobs:
@@ -7,34 +7,33 @@ jobs:
     timeout-minutes: 360
     
     steps:
-      # 1. 拉取代码
       - name: Checkout Code
         uses: actions/checkout@v3
         with:
           repository: Jiaye-apple/wf--my-electron-app
 
-      # 2. 安装遥控工具 (cliclick + cloudflared)
+      # 1. 安装遥控工具
       - name: Install Tools
         run: |
           brew install cliclick
           brew install cloudflared
           pip3 install flask --break-system-packages
 
-      # 3. 禁止休眠
+      # 2. 禁止休眠
       - name: Disable Sleep
         run: |
           sudo systemsetup -setcomputersleep Never
           sudo systemsetup -setdisplaysleep Never
           echo "✅ 已禁止休眠"
 
-      # 4. 修复 Windows 命令 (必做)
+      # 3. 修复 Windows 命令
       - name: Fix package.json
         run: |
           if [ -f "package.json" ]; then
             sed -i '' 's/chcp 65001 && //g' package.json
           fi
 
-      # 5. 启动“全功能”遥控服务器 (让你能操作)
+      # 4. 启动网页遥控器
       - name: Start Remote Controller
         run: |
           cat << 'EOF' > remote_server.py
@@ -48,18 +47,17 @@ jobs:
               return '''
               <html>
               <head>
-                  <title>Mac 打包测试遥控器</title>
+                  <title>Mac 调试遥控器</title>
+                  <meta charset="utf-8">
                   <style>
                       body { background: #222; text-align: center; color: white; margin: 0; font-family: sans-serif; }
                       #screen { cursor: crosshair; border: 2px solid cyan; max-width: 95%; margin-top: 10px;}
                       .controls { padding: 10px; background: #333; }
                       button { padding: 8px 15px; background: #444; color: white; border: 1px solid #777; cursor: pointer; border-radius: 4px; }
-                      button:hover { background: #555; }
                   </style>
               </head>
               <body>
                   <div class="controls">
-                      <strong>操作模式：</strong>
                       <button onclick="setMode('click')">🖱️ 点击</button>
                       <button onclick="setMode('type')">⌨️ 输入文字</button>
                       <span id="status" style="margin-left:10px; color:#0f0;">🟢 实时监控中</span>
@@ -68,31 +66,20 @@ jobs:
                   
                   <script>
                       const img = document.getElementById('screen');
-                      let mode = 'click';
-                      
-                      // 1. 自动刷新画面
                       setInterval(() => { img.src = '/shot?t=' + new Date().getTime(); }, 1500);
                       
-                      // 2. 模式切换
-                      window.setMode = (m) => { 
-                          mode = m; 
-                          if(m === 'type') {
-                              let t = prompt("请输入要发送到 Mac 的文字:");
-                              if(t) fetch('/type?text=' + encodeURIComponent(t));
-                              mode = 'click';
-                          }
-                      }
-                      
-                      // 3. 处理点击
                       function handleClick(event) {
                           const rect = img.getBoundingClientRect();
-                          const scaleX = img.naturalWidth / rect.width;
-                          const scaleY = img.naturalHeight / rect.height;
-                          const x = Math.round((event.clientX - rect.left) * scaleX);
-                          const y = Math.round((event.clientY - rect.top) * scaleY);
-                          
-                          document.getElementById('status').innerText = `🖱️ 点击: ${x}, ${y}`;
+                          const x = Math.round((event.clientX - rect.left) * (img.naturalWidth / rect.width));
+                          const y = Math.round((event.clientY - rect.top) * (img.naturalHeight / rect.height));
                           fetch(`/click?x=${x}&y=${y}`);
+                      }
+                      
+                      window.setMode = (m) => {
+                          if(m === 'type') {
+                              let t = prompt("输入文字:");
+                              if(t) fetch('/type?text=' + encodeURIComponent(t));
+                          }
                       }
                   </script>
               </body>
@@ -110,7 +97,7 @@ jobs:
               y = request.args.get('y')
               subprocess.run(['cliclick', f'c:{x},{y}'])
               return "ok"
-              
+
           @app.route('/type')
           def type_text():
               text = request.args.get('text')
@@ -122,41 +109,43 @@ jobs:
           EOF
           python3 remote_server.py &
 
-      # 6. 启动 Cloudflare (生成链接)
+      # 5. 启动 Cloudflare (生成链接)
       - name: Start Tunnel
         run: |
           cloudflared tunnel --url http://localhost:8080 > tunnel.log 2>&1 &
           sleep 10
           echo "========================================================"
-          echo "🎮 遥控链接已生成："
+          echo "🎮 遥控链接："
           grep -o 'https://.*\.trycloudflare.com' tunnel.log | head -n 1
           echo "========================================================"
 
-      # 7. 【核心】打包并运行打包好的软件
-      - name: Build and Open App
+      # 6. 【核心修复】构建并运行
+      - name: Build and Run
         run: |
           echo "🚀 安装依赖..."
           npm install
           npm install --save-dev electron-builder
           
-          echo "📦 正在打包 (这需要几分钟)..."
-          ./node_modules/.bin/electron-builder --mac --x64
+          echo "📦 正在构建 (生成可运行的 .app)..."
+          # 🔴 关键修改1：使用 --dir 参数，强制生成解压后的文件夹，而不是 zip
+          ./node_modules/.bin/electron-builder --mac --x64 --dir
           
-          echo "✅ 打包完成！准备运行..."
+          echo "📂 查看构建结果："
+          ls -R dist/mac/
           
-          # 找到打包出来的 .app 文件并打开
-          # 通常在 dist/mac/ 或者 dist/ 目录下
-          APP_PATH=$(find dist -name "*.app" | head -n 1)
+          echo "🚀 正在启动应用..."
+          # 找到 .app 文件
+          APP_PATH=$(find dist/mac -name "*.app" | head -n 1)
           
           if [ -z "$APP_PATH" ]; then
-            echo "❌ 未找到 .app 文件，打包可能失败"
-            ls -R dist/
+            echo "❌ 还是没找到 .app 文件！"
             exit 1
           else
-            echo "🚀 正在打开打包好的应用: $APP_PATH"
-            open -a "$APP_PATH"
+            echo "✅ 找到应用: $APP_PATH"
+            # 🔴 关键修改2：去掉 -a，直接 open 文件路径
+            open "$APP_PATH"
           fi
 
-      # 8. 保持运行 (让你慢慢测试)
+      # 7. 保持运行
       - name: Keep Alive
         run: sleep 21600
