@@ -1,4 +1,4 @@
-name: Mac-Screenshot-Stream
+name: Mac-Screenshot-Fix
 on: workflow_dispatch
 
 jobs:
@@ -10,19 +10,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v3
 
-      # 1. 禁止休眠 (这是基本功)
+      # 1. 禁止休眠
       - name: Disable Sleep
         run: |
           sudo systemsetup -setcomputersleep Never
           sudo systemsetup -setdisplaysleep Never
           echo "✅ 已禁止休眠"
 
-      # 2. 搭建一个“实时截屏”网站 (Python)
-      # 这是一个神奇的脚本，它把当前屏幕变成一个网页图片
+      # 2. 启动截屏服务器 (修复了 pip 报错)
       - name: Start Screenshot Server
         run: |
-          # 安装 Flask 网页框架
-          pip3 install flask
+          echo "正在安装依赖..."
+          # 【关键修复】加上 --break-system-packages 强制安装，忽略报错
+          pip3 install flask --break-system-packages
           
           # 写入 Python 脚本
           cat << 'EOF' > screen_server.py
@@ -34,22 +34,24 @@ jobs:
           
           @app.route('/')
           def index():
-              # HTML 页面，带自动刷新功能 (每 2 秒刷一次)
+              # 自动刷新网页 (每 2 秒)
               return '''
               <html>
-                <head><meta http-equiv="refresh" content="2"></head>
-                <body style="background:#333; color:white; text-align:center;">
-                  <h1>macOS 实时监控</h1>
-                  <img src="/shot" style="max-width:100%; border:2px solid #fff;">
-                  <p>页面每 2 秒自动刷新</p>
+                <head>
+                    <meta http-equiv="refresh" content="2">
+                    <style>body{background:#222;color:#fff;text-align:center;margin:0;padding:20px;}</style>
+                </head>
+                <body>
+                  <h1>macOS 实时桌面 (只读模式)</h1>
+                  <p>Electron 运行后，你会在这里看到画面 👇</p>
+                  <img src="/shot" style="max-width:90%; border:4px solid #fff; box-shadow: 0 0 20px rgba(0,0,0,0.5);">
                 </body>
               </html>
               '''
           
           @app.route('/shot')
           def shot():
-              # 调用系统命令截屏 (screencapture 是 Mac 自带的)
-              # -x 表示静音，screen.png 是保存路径
+              # 截屏并保存
               subprocess.run(['screencapture', '-x', 'screen.png'])
               return send_file('screen.png')
           
@@ -57,12 +59,11 @@ jobs:
               app.run(host='0.0.0.0', port=8080)
           EOF
           
-          # 后台启动这个服务器
+          # 后台启动
           python3 screen_server.py &
           echo "✅ 截屏服务器已启动 (端口 8080)"
 
-      # 3. 启动 Cloudflare 隧道 (把 8080 端口映射出去)
-      # 这次我们不需要 Ngrok，用 Cloudflare 更快且免费
+      # 3. 启动 Cloudflare (免费隧道，看画面用)
       - name: Start Cloudflare Tunnel
         run: |
           brew install cloudflared
@@ -72,13 +73,17 @@ jobs:
           sleep 10
           
           echo "========================================================"
-          echo "🎉 监控链接已生成！复制下面的链接到浏览器打开："
+          echo "🎉 画面监控链接已生成！复制下面的链接到浏览器打开："
           echo "--------------------------------------------------------"
           grep -o 'https://.*\.trycloudflare.com' tunnel.log | head -n 1
           echo "--------------------------------------------------------"
           echo "无需密码，直接访问即可看到桌面！"
           echo "========================================================"
 
-      # 4. 保持运行 (让你有时间去下载代码和测试)
+      # 4. (可选) 自动下载并运行你的 Electron 项目
+      # 如果你想让脚本自动帮你跑项目，可以在这里加下载命令
+      # - name: Run My App
+      #   run: ...
+
       - name: Keep Alive
         run: sleep 21600
