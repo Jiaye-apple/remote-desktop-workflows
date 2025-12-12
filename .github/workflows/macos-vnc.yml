@@ -1,9 +1,8 @@
-name: RealVNC-Latest-Fix
+name: RealVNC-BlackScreen-Fix
 on: workflow_dispatch
 
 jobs:
   debug-job:
-    # 🔴 必须改用 latest，因为旧版已下架
     runs-on: macos-latest
     timeout-minutes: 360
     
@@ -11,70 +10,54 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v3
 
-      # 1.【核心】创建专用管理员账户 (新系统必须用这个！)
+      # 1. 创建管理员账户 (你已经验证过这个能登录)
       - name: Create Admin User
         run: |
-          echo "正在创建专用管理员账户..."
-          # 创建用户 adminuser，密码 123456
-          # 这一步在新系统上至关重要，因为默认账户被锁死了
           sudo sysadminctl -addUser adminuser -fullName "Admin User" -password "123456" -admin
-          echo "✅ 用户 adminuser 创建成功"
 
-      # 2. 禁止睡眠 (防止连上去黑屏)
-      - name: Disable Sleep
+      # 2.【关键修复A】给系统灌咖啡 (模拟用户活跃，防止休眠)
+      - name: Keep Awake (Caffeinate)
         run: |
-          sudo systemsetup -setcomputersleep Never
-          sudo systemsetup -setdisplaysleep Never
-          sudo defaults write /Library/Preferences/com.apple.screensaver loginWindowIdleTime 0
-          echo "✅ 已禁止休眠"
+          # -u 表示模拟用户活动，-t 指定秒数 (6小时)
+          # & 让它在后台一直跑
+          caffeinate -u -t 21600 &
+          echo "✅ 已启动防休眠进程"
 
-      # 3. 启动 VNC 并授权给新用户
+      # 3. 启动 VNC 并授权
       - name: Start VNC Server
         run: |
-          echo "正在启动 VNC..."
-          
-          # 激活远程管理服务 (新系统通用指令)
+          # 激活服务
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
           -activate -configure -access -on -restart -agent -privs -all -allowAccessFor -allUsers
           
-          # 【重点】明确允许 adminuser 访问，并赋予所有权限
+          # 授权 adminuser
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
           -configure -users adminuser -access -on -privs -all
           
-          # 尝试开启兼容模式 (即使新系统可能忽略它，但为了 RealVNC 连接协议兼容，我们保留它)
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-          -configure -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw 123456 || echo "⚠️ 注意：旧版 VNC 设置可能被新系统部分忽略，请务必使用账号登录"
-          
-          echo "✅ VNC 已启动，允许 adminuser 登录"
+          echo "✅ VNC 已启动"
 
-      # 4. 启动 Ngrok (读取你的 Token)
+      # 4.【关键修复B】强制切换 GUI 到 adminuser (抢占前台)
+      - name: Switch to Admin User GUI
+        run: |
+          echo "正在尝试切换画面..."
+          # 获取 adminuser 的用户 ID
+          ADMIN_UID=$(id -u adminuser)
+          
+          # 强制系统把显示器画面切给 adminuser
+          # 就算没有显示器，这也能通知 WindowServer 渲染该用户的桌面
+          sudo "/System/Library/CoreServices/Menu Extras/User.menu/Contents/Resources/CGSession" -switchToUserID $ADMIN_UID || echo "⚠️ 切换命令可能在新系统上受限，但已尝试"
+          
+          echo "✅ 画面切换指令已发送"
+
+      # 5. 启动 Ngrok
       - name: Start Ngrok Tunnel
         env:
-          # 读取你在后台设置的 Token
           NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
         run: |
-          if [ -z "$NGROK_AUTHTOKEN" ]; then
-            echo "❌ 错误：未检测到 Token，请检查 GitHub Secrets！"
-            exit 1
-          fi
-
           brew install ngrok/ngrok/ngrok
-          
-          # 启动 TCP 隧道
           ngrok tcp 5900 --log=stdout > ngrok.log &
-          
-          echo "正在连接 Ngrok 服务器..."
           sleep 10
-          
-          echo "========================================================"
-          echo "🚀 连接成功！请在 RealVNC Viewer 输入下面的地址："
-          echo "--------------------------------------------------------"
           grep -o "tcp://.*:[0-9]*" ngrok.log
-          echo "--------------------------------------------------------"
-          echo "⚠️ 登录时请严格按照以下输入 (不要填错)："
-          echo "👤 Username: adminuser"
-          echo "🔑 Password: 123456"
-          echo "========================================================"
 
       - name: Keep Alive
         run: sleep 21600
