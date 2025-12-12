@@ -1,4 +1,4 @@
-name: Web-Remote-Control
+name: Full-Function-Remote
 on: workflow_dispatch
 
 jobs:
@@ -12,8 +12,7 @@ jobs:
         with:
           repository: Jiaye-apple/wf--my-electron-app
 
-      # 1. 安装鼠标控制工具 (cliclick)
-      # 这是实现“远程点击”的核心工具
+      # 1. 安装工具 (cliclick 是核心)
       - name: Install Utilities
         run: |
           brew install cliclick
@@ -27,120 +26,194 @@ jobs:
           sudo systemsetup -setdisplaysleep Never
           echo "✅ 已禁止休眠"
 
-      # 3. 修复 Windows 命令报错 (chcp)
-      # 这一步解决你之前 npm start 跑不起来的问题
+      # 3. 修复 Windows 命令
       - name: Fix Windows Command
         run: |
           if [ -f "package.json" ]; then
-            echo "🔧 正在移除 package.json 中的 Windows 命令..."
             sed -i '' 's/chcp 65001 && //g' package.json
             echo "✅ 修复完成"
-          else
-            echo "⚠️ 没找到 package.json，跳过修复"
           fi
 
-      # 4. 启动“Web 遥控器”服务器
-      - name: Start Web Remote
+      # 4. 启动“全功能”遥控服务器
+      - name: Start Full Remote
         run: |
           cat << 'EOF' > remote_server.py
           from flask import Flask, send_file, request
           import subprocess
-          import time
+          import urllib.parse
           
           app = Flask(__name__)
           
-          # 网页前端：包含画面和点击逻辑
           @app.route('/')
           def index():
               return '''
               <html>
               <head>
-                  <title>Mac 网页遥控器</title>
+                  <title>Mac 全功能遥控</title>
+                  <meta charset="utf-8">
                   <style>
-                      body { background: #222; text-align: center; color: white; margin: 0; overflow: hidden; }
-                      #screen { cursor: crosshair; border: 2px solid cyan; max-width: 100%; }
-                      #status { position: fixed; top: 10px; left: 10px; background: rgba(0,0,0,0.7); padding: 5px; border-radius: 5px; }
+                      body { background: #222; text-align: center; color: white; margin: 0; font-family: sans-serif; }
+                      #screen-container { position: relative; display: inline-block; margin-top: 10px; }
+                      #screen { cursor: crosshair; border: 2px solid cyan; max-width: 95%; }
+                      #controls { padding: 10px; background: #333; border-bottom: 1px solid #555; display: flex; justify-content: center; gap: 10px; align-items: center; }
+                      button { padding: 8px 15px; background: #444; color: white; border: 1px solid #777; cursor: pointer; border-radius: 4px; }
+                      button.active { background: #007bff; border-color: #0056b3; }
+                      input { padding: 8px; border-radius: 4px; border: none; }
+                      .status { color: #aaa; font-size: 12px; margin-top: 5px; }
                   </style>
               </head>
               <body>
-                  <div id="status">🔴 正在连接...</div>
-                  <img id="screen" src="/shot" onclick="handleClick(event)">
+                  <div id="controls">
+                      <span>模式:</span>
+                      <button id="btnClick" class="active" onclick="setMode('click')">🖱️ 点击</button>
+                      <button id="btnDrag" onclick="setMode('drag')">✋ 拖拽 (A到B)</button>
+                      <span style="width: 20px;"></span>
+                      <input type="text" id="typeText" placeholder="输入文字...">
+                      <button onclick="sendText()">⌨️ 发送文本</button>
+                  </div>
+                  
+                  <div id="screen-container">
+                      <img id="screen" src="/shot" draggable="false">
+                  </div>
+                  <div id="status" class="status">🟢 滚轮可滚动 | 点击图片操作</div>
                   
                   <script>
                       const img = document.getElementById('screen');
                       const status = document.getElementById('status');
+                      let mode = 'click';
+                      let dragStart = null;
                       
-                      // 1. 自动刷新画面 (模拟视频流)
+                      // 1. 模式切换
+                      function setMode(newMode) {
+                          mode = newMode;
+                          document.getElementById('btnClick').className = mode === 'click' ? 'active' : '';
+                          document.getElementById('btnDrag').className = mode === 'drag' ? 'active' : '';
+                          dragStart = null;
+                          status.innerText = mode === 'drag' ? "🟡 拖拽模式: 请先点击起点 A" : "🟢 点击模式";
+                      }
+                      
+                      // 2. 自动刷新画面
                       setInterval(() => {
                           img.src = '/shot?t=' + new Date().getTime();
-                          status.innerText = "🟢 实时监控中";
-                      }, 1500); // 1.5秒刷新一次
+                      }, 1500);
                       
-                      // 2. 处理鼠标点击
-                      function handleClick(event) {
+                      // 3. 处理点击 (包含拖拽逻辑)
+                      img.onclick = function(event) {
+                          const coords = getCoords(event);
+                          
+                          if (mode === 'click') {
+                              status.innerText = `🖱️ 点击: ${coords.x}, ${coords.y}`;
+                              fetch(`/click?x=${coords.x}&y=${coords.y}`);
+                          } else if (mode === 'drag') {
+                              if (!dragStart) {
+                                  dragStart = coords;
+                                  status.innerText = `🟡 起点已定 (${coords.x},${coords.y})，请点击终点 B`;
+                              } else {
+                                  status.innerText = `🚀 执行拖拽: (${dragStart.x},${dragStart.y}) -> (${coords.x},${coords.y})`;
+                                  fetch(`/drag?x1=${dragStart.x}&y1=${dragStart.y}&x2=${coords.x}&y2=${coords.y}`);
+                                  dragStart = null;
+                                  // 拖完自动切回点击模式
+                                  setTimeout(() => setMode('click'), 1000);
+                              }
+                          }
+                      };
+                      
+                      // 4. 处理滚轮 (模拟滚动)
+                      img.onwheel = function(event) {
+                          event.preventDefault();
+                          // 限制发送频率，防止卡死
+                          if (event.deltaY > 0) fetch('/scroll?dir=down');
+                          else fetch('/scroll?dir=up');
+                          status.innerText = event.deltaY > 0 ? "⬇️ 向下滚动" : "⬆️ 向上滚动";
+                      };
+                      
+                      // 5. 发送文本
+                      function sendText() {
+                          const text = document.getElementById('typeText').value;
+                          if(text) fetch('/type?text=' + encodeURIComponent(text));
+                      }
+                      
+                      // 辅助：计算坐标
+                      function getCoords(event) {
                           const rect = img.getBoundingClientRect();
-                          // 计算点击位置在图片中的比例
                           const scaleX = img.naturalWidth / rect.width;
                           const scaleY = img.naturalHeight / rect.height;
-                          
-                          const realX = Math.round((event.clientX - rect.left) * scaleX);
-                          const realY = Math.round((event.clientY - rect.top) * scaleY);
-                          
-                          status.innerText = `🖱️ 点击: ${realX}, ${realY}`;
-                          
-                          // 发送点击指令给 Mac
-                          fetch(`/click?x=${realX}&y=${realY}`);
+                          return {
+                              x: Math.round((event.clientX - rect.left) * scaleX),
+                              y: Math.round((event.clientY - rect.top) * scaleY)
+                          };
                       }
                   </script>
               </body>
               </html>
               '''
           
-          # 接口：获取截图
+          # 接口：截图
           @app.route('/shot')
           def shot():
               subprocess.run(['screencapture', '-x', '-C', 'screen.png'])
               return send_file('screen.png')
           
-          # 接口：执行点击
+          # 接口：点击
           @app.route('/click')
           def click():
               x = request.args.get('x')
               y = request.args.get('y')
-              print(f"Executing click at {x}, {y}")
-              # 调用 cliclick 工具点击屏幕
+              # cliclick c:x,y (点击)
               subprocess.run(['cliclick', f'c:{x},{y}'])
+              return "ok"
+          
+          # 接口：拖拽 (Swipe)
+          @app.route('/drag')
+          def drag():
+              x1 = request.args.get('x1')
+              y1 = request.args.get('y1')
+              x2 = request.args.get('x2')
+              y2 = request.args.get('y2')
+              # cliclick dd:按下 w:等待 m:移动 du:抬起
+              # 模拟人类的拖动操作
+              cmd = f'dd:{x1},{y1} w:200 m:{x2},{y2} w:200 du:{x2},{y2}'
+              subprocess.run(['cliclick', cmd])
+              return "ok"
+          
+          # 接口：滚动
+          @app.route('/scroll')
+          def scroll():
+              direction = request.args.get('dir')
+              # 使用键盘箭头键模拟滚动 (比模拟滚轮更稳定)
+              key = 'arrow-down' if direction == 'down' else 'arrow-up'
+              subprocess.run(['cliclick', f'kp:{key}'])
+              return "ok"
+              
+          # 接口：打字
+          @app.route('/type')
+          def type_text():
+              text = request.args.get('text')
+              # cliclick t:text
+              subprocess.run(['cliclick', f't:{text}'])
               return "ok"
           
           if __name__ == '__main__':
               app.run(host='0.0.0.0', port=8080)
           EOF
           
-          # 后台启动
           python3 remote_server.py &
-          echo "✅ 遥控服务器已启动"
 
-      # 5. 启动 Cloudflare 隧道 (提供访问链接)
+      # 5. 启动 Cloudflare
       - name: Start Tunnel
         run: |
           cloudflared tunnel --url http://localhost:8080 > tunnel.log 2>&1 &
           sleep 10
           echo "========================================================"
-          echo "🎮 遥控器链接已生成："
+          echo "🎮 全能遥控器地址："
           grep -o 'https://.*\.trycloudflare.com' tunnel.log | head -n 1
           echo "========================================================"
 
-      # 6. 安装依赖并启动 Electron (带自动修复)
+      # 6. 启动 Electron
       - name: Run Electron
         run: |
-          echo "🚀 安装依赖..."
           npm install
-          
-          echo "🚀 启动 Electron..."
-          # 使用 electron 直接启动，规避 npm start 可能残留的问题
           ./node_modules/.bin/electron . &
-          
-          echo "✅ Electron 已发送启动指令，请去网页操作！"
 
       # 7. 保持运行
       - name: Keep Alive
