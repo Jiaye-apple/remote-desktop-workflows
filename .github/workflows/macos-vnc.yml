@@ -1,4 +1,4 @@
-name: Mac-Screenshot-Fix
+name: Run-From-Git
 on: workflow_dispatch
 
 jobs:
@@ -7,51 +7,50 @@ jobs:
     timeout-minutes: 360
     
     steps:
-      - name: Checkout
+      # 1. 【核心修改】直接拉取别人的仓库
+      # 这一步会把你指定的仓库代码全部下载到云端 Mac 上
+      - name: Checkout Target Repository
         uses: actions/checkout@v3
+        with:
+          repository: Jiaye-apple/wf--my-electron-app
+          # 如果是私有仓库，还需要 token，但公共仓库直接填名字就行
 
-      # 1. 禁止休眠
+      # 2. 禁止休眠 (防止黑屏)
       - name: Disable Sleep
         run: |
           sudo systemsetup -setcomputersleep Never
           sudo systemsetup -setdisplaysleep Never
           echo "✅ 已禁止休眠"
 
-      # 2. 启动截屏服务器 (修复了 pip 报错)
+      # 3. 启动截屏监控 (让你能看到画面)
       - name: Start Screenshot Server
         run: |
-          echo "正在安装依赖..."
-          # 【关键修复】加上 --break-system-packages 强制安装，忽略报错
+          # 安装 Flask (强制忽略系统限制)
           pip3 install flask --break-system-packages
           
-          # 写入 Python 脚本
+          # 创建监控脚本
           cat << 'EOF' > screen_server.py
           from flask import Flask, send_file
           import subprocess
-          import time
           
           app = Flask(__name__)
           
           @app.route('/')
           def index():
-              # 自动刷新网页 (每 2 秒)
               return '''
               <html>
-                <head>
-                    <meta http-equiv="refresh" content="2">
-                    <style>body{background:#222;color:#fff;text-align:center;margin:0;padding:20px;}</style>
-                </head>
-                <body>
-                  <h1>macOS 实时桌面 (只读模式)</h1>
-                  <p>Electron 运行后，你会在这里看到画面 👇</p>
-                  <img src="/shot" style="max-width:90%; border:4px solid #fff; box-shadow: 0 0 20px rgba(0,0,0,0.5);">
+                <head><meta http-equiv="refresh" content="2"></head>
+                <body style="background:#222;color:#fff;text-align:center;">
+                  <h1>wf--my-electron-app 运行监控</h1>
+                  <p>👇 你的软件窗口应该显示在下面 👇</p>
+                  <img src="/shot" style="max-width:95%; border:2px solid #fff;">
                 </body>
               </html>
               '''
           
           @app.route('/shot')
           def shot():
-              # 截屏并保存
+              # 截取屏幕
               subprocess.run(['screencapture', '-x', 'screen.png'])
               return send_file('screen.png')
           
@@ -59,31 +58,33 @@ jobs:
               app.run(host='0.0.0.0', port=8080)
           EOF
           
-          # 后台启动
+          # 后台启动监控
           python3 screen_server.py &
-          echo "✅ 截屏服务器已启动 (端口 8080)"
 
-      # 3. 启动 Cloudflare (免费隧道，看画面用)
+      # 4. 启动 Cloudflare (生成观看链接)
       - name: Start Cloudflare Tunnel
         run: |
           brew install cloudflared
           cloudflared tunnel --url http://localhost:8080 > tunnel.log 2>&1 &
-          
-          echo "正在生成链接..."
           sleep 10
-          
           echo "========================================================"
-          echo "🎉 画面监控链接已生成！复制下面的链接到浏览器打开："
-          echo "--------------------------------------------------------"
+          echo "🎉 观看链接："
           grep -o 'https://.*\.trycloudflare.com' tunnel.log | head -n 1
-          echo "--------------------------------------------------------"
-          echo "无需密码，直接访问即可看到桌面！"
           echo "========================================================"
 
-      # 4. (可选) 自动下载并运行你的 Electron 项目
-      # 如果你想让脚本自动帮你跑项目，可以在这里加下载命令
-      # - name: Run My App
-      #   run: ...
+      # 5. 【自动运行】安装依赖并启动 Electron
+      - name: Install & Run Electron
+        run: |
+          echo "📂 当前目录文件检查："
+          ls -la
+          
+          echo "🚀 正在安装依赖 (npm install)..."
+          npm install
+          
+          echo "🚀 正在启动 Electron..."
+          # 使用 & 让它在后台运行
+          npm start &
 
+      # 6. 保持运行
       - name: Keep Alive
         run: sleep 21600
