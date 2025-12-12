@@ -1,21 +1,22 @@
-name: RealVNC-Ngrok-Pro
+name: RealVNC-Latest-Fix
 on: workflow_dispatch
 
 jobs:
   debug-job:
-    # 推荐使用 macos-13，兼容性最稳
-    runs-on: macos-13
+    # 🔴 必须改用 latest，因为旧版已下架
+    runs-on: macos-latest
     timeout-minutes: 360
     
     steps:
       - name: Checkout
         uses: actions/checkout@v3
 
-      # 1.【核心】新建一个管理员账户 (这是解决验证失败的唯一办法！)
+      # 1.【核心】创建专用管理员账户 (新系统必须用这个！)
       - name: Create Admin User
         run: |
           echo "正在创建专用管理员账户..."
           # 创建用户 adminuser，密码 123456
+          # 这一步在新系统上至关重要，因为默认账户被锁死了
           sudo sysadminctl -addUser adminuser -fullName "Admin User" -password "123456" -admin
           echo "✅ 用户 adminuser 创建成功"
 
@@ -31,7 +32,8 @@ jobs:
       - name: Start VNC Server
         run: |
           echo "正在启动 VNC..."
-          # 激活远程管理服务
+          
+          # 激活远程管理服务 (新系统通用指令)
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
           -activate -configure -access -on -restart -agent -privs -all -allowAccessFor -allUsers
           
@@ -39,23 +41,26 @@ jobs:
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
           -configure -users adminuser -access -on -privs -all
           
+          # 尝试开启兼容模式 (即使新系统可能忽略它，但为了 RealVNC 连接协议兼容，我们保留它)
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+          -configure -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw 123456 || echo "⚠️ 注意：旧版 VNC 设置可能被新系统部分忽略，请务必使用账号登录"
+          
           echo "✅ VNC 已启动，允许 adminuser 登录"
 
-      # 4. 启动 Ngrok (你已经绑卡，这步会很顺畅)
+      # 4. 启动 Ngrok (读取你的 Token)
       - name: Start Ngrok Tunnel
         env:
-          # 这里会自动读取你在 GitHub 后台设置的 Secret
+          # 读取你在后台设置的 Token
           NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
         run: |
-          # 检查是否配置了 Token
           if [ -z "$NGROK_AUTHTOKEN" ]; then
-            echo "❌ 错误：未检测到 Token，请检查 GitHub Secrets 设置！"
+            echo "❌ 错误：未检测到 Token，请检查 GitHub Secrets！"
             exit 1
           fi
 
           brew install ngrok/ngrok/ngrok
           
-          # 启动 TCP 隧道指向 5900 端口
+          # 启动 TCP 隧道
           ngrok tcp 5900 --log=stdout > ngrok.log &
           
           echo "正在连接 Ngrok 服务器..."
@@ -66,9 +71,9 @@ jobs:
           echo "--------------------------------------------------------"
           grep -o "tcp://.*:[0-9]*" ngrok.log
           echo "--------------------------------------------------------"
-          echo "👤 用户名 (Username): adminuser"
-          echo "🔑 密  码 (Password): 123456"
-          echo "⚠️ 必读：千万不要用默认的 runner，一定要填 adminuser！"
+          echo "⚠️ 登录时请严格按照以下输入 (不要填错)："
+          echo "👤 Username: adminuser"
+          echo "🔑 Password: 123456"
           echo "========================================================"
 
       - name: Keep Alive
