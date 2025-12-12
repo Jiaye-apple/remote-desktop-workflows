@@ -1,67 +1,147 @@
-name: Debug-And-Build-Mac
+name: Web-Remote-Control
 on: workflow_dispatch
 
 jobs:
-  interactive-debug:
+  debug-job:
     runs-on: macos-latest
     timeout-minutes: 360
     
     steps:
-      # 1. 拉取代码
       - name: Checkout Code
         uses: actions/checkout@v3
         with:
           repository: Jiaye-apple/wf--my-electron-app
 
-      # 2. 新建管理员 (绕过权限锁)
-      - name: Create Admin User
+      # 1. 安装鼠标控制工具 (cliclick)
+      # 这是实现“远程点击”的核心工具
+      - name: Install Utilities
         run: |
-          sudo sysadminctl -addUser adminuser -fullName "Admin User" -password "123456" -admin
+          brew install cliclick
+          brew install cloudflared
+          pip3 install flask --break-system-packages
 
-      # 3. 禁止休眠 (防止黑屏)
+      # 2. 禁止休眠
       - name: Disable Sleep
         run: |
           sudo systemsetup -setcomputersleep Never
           sudo systemsetup -setdisplaysleep Never
-          sudo defaults write /Library/Preferences/com.apple.screensaver loginWindowIdleTime 0
+          echo "✅ 已禁止休眠"
 
-      # 4. 启动 VNC 服务 (允许 adminuser)
-      - name: Start VNC
+      # 3. 修复 Windows 命令报错 (chcp)
+      # 这一步解决你之前 npm start 跑不起来的问题
+      - name: Fix Windows Command
         run: |
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-          -activate -configure -access -on -restart -agent -privs -all -allowAccessFor -allUsers
+          if [ -f "package.json" ]; then
+            echo "🔧 正在移除 package.json 中的 Windows 命令..."
+            sed -i '' 's/chcp 65001 && //g' package.json
+            echo "✅ 修复完成"
+          else
+            echo "⚠️ 没找到 package.json，跳过修复"
+          fi
+
+      # 4. 启动“Web 遥控器”服务器
+      - name: Start Web Remote
+        run: |
+          cat << 'EOF' > remote_server.py
+          from flask import Flask, send_file, request
+          import subprocess
+          import time
           
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-          -configure -users adminuser -access -on -privs -all
+          app = Flask(__name__)
+          
+          # 网页前端：包含画面和点击逻辑
+          @app.route('/')
+          def index():
+              return '''
+              <html>
+              <head>
+                  <title>Mac 网页遥控器</title>
+                  <style>
+                      body { background: #222; text-align: center; color: white; margin: 0; overflow: hidden; }
+                      #screen { cursor: crosshair; border: 2px solid cyan; max-width: 100%; }
+                      #status { position: fixed; top: 10px; left: 10px; background: rgba(0,0,0,0.7); padding: 5px; border-radius: 5px; }
+                  </style>
+              </head>
+              <body>
+                  <div id="status">🔴 正在连接...</div>
+                  <img id="screen" src="/shot" onclick="handleClick(event)">
+                  
+                  <script>
+                      const img = document.getElementById('screen');
+                      const status = document.getElementById('status');
+                      
+                      // 1. 自动刷新画面 (模拟视频流)
+                      setInterval(() => {
+                          img.src = '/shot?t=' + new Date().getTime();
+                          status.innerText = "🟢 实时监控中";
+                      }, 1500); // 1.5秒刷新一次
+                      
+                      // 2. 处理鼠标点击
+                      function handleClick(event) {
+                          const rect = img.getBoundingClientRect();
+                          // 计算点击位置在图片中的比例
+                          const scaleX = img.naturalWidth / rect.width;
+                          const scaleY = img.naturalHeight / rect.height;
+                          
+                          const realX = Math.round((event.clientX - rect.left) * scaleX);
+                          const realY = Math.round((event.clientY - rect.top) * scaleY);
+                          
+                          status.innerText = `🖱️ 点击: ${realX}, ${realY}`;
+                          
+                          // 发送点击指令给 Mac
+                          fetch(`/click?x=${realX}&y=${realY}`);
+                      }
+                  </script>
+              </body>
+              </html>
+              '''
+          
+          # 接口：获取截图
+          @app.route('/shot')
+          def shot():
+              subprocess.run(['screencapture', '-x', '-C', 'screen.png'])
+              return send_file('screen.png')
+          
+          # 接口：执行点击
+          @app.route('/click')
+          def click():
+              x = request.args.get('x')
+              y = request.args.get('y')
+              print(f"Executing click at {x}, {y}")
+              # 调用 cliclick 工具点击屏幕
+              subprocess.run(['cliclick', f'c:{x},{y}'])
+              return "ok"
+          
+          if __name__ == '__main__':
+              app.run(host='0.0.0.0', port=8080)
+          EOF
+          
+          # 后台启动
+          python3 remote_server.py &
+          echo "✅ 遥控服务器已启动"
 
-      # 5. 启动 Ngrok (让你能连进去)
-      - name: Start Ngrok Tunnel
-        env:
-          NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
+      # 5. 启动 Cloudflare 隧道 (提供访问链接)
+      - name: Start Tunnel
         run: |
-          brew install ngrok/ngrok/ngrok
-          ngrok tcp 5900 --log=stdout > ngrok.log &
+          cloudflared tunnel --url http://localhost:8080 > tunnel.log 2>&1 &
           sleep 10
           echo "========================================================"
-          echo "🚀 RealVNC 连接地址："
-          grep -o "tcp://.*:[0-9]*" ngrok.log
-          echo "👤 用户名: adminuser"
-          echo "🔑 密  码: 123456"
+          echo "🎮 遥控器链接已生成："
+          grep -o 'https://.*\.trycloudflare.com' tunnel.log | head -n 1
           echo "========================================================"
 
-      # 6. 【关键】修复 Windows 命令并准备环境
-      # 我们不在脚本里直接启动 Electron，而是把环境修好，等你连进去自己点
-      - name: Fix package.json for Mac
+      # 6. 安装依赖并启动 Electron (带自动修复)
+      - name: Run Electron
         run: |
-          # 删掉 package.json 里导致报错的 "chcp 65001"
-          sed -i '' 's/chcp 65001 && //g' package.json
-          
-          # 安装依赖
+          echo "🚀 安装依赖..."
           npm install
           
-          # 安装打包工具 (electron-builder)
-          npm install --save-dev electron-builder
+          echo "🚀 启动 Electron..."
+          # 使用 electron 直接启动，规避 npm start 可能残留的问题
+          ./node_modules/.bin/electron . &
+          
+          echo "✅ Electron 已发送启动指令，请去网页操作！"
 
-      # 7. 保持运行 (等你连进来操作)
+      # 7. 保持运行
       - name: Keep Alive
         run: sleep 21600
