@@ -1,87 +1,67 @@
-name: Mac-Electron-Fix-Chcp
+name: Debug-And-Build-Mac
 on: workflow_dispatch
 
 jobs:
-  debug-job:
+  interactive-debug:
     runs-on: macos-latest
     timeout-minutes: 360
     
     steps:
-      # 1. 拉取你的仓库
-      - name: Checkout Target Repository
+      # 1. 拉取代码
+      - name: Checkout Code
         uses: actions/checkout@v3
         with:
           repository: Jiaye-apple/wf--my-electron-app
 
-      # 2. 禁止休眠
+      # 2. 新建管理员 (绕过权限锁)
+      - name: Create Admin User
+        run: |
+          sudo sysadminctl -addUser adminuser -fullName "Admin User" -password "123456" -admin
+
+      # 3. 禁止休眠 (防止黑屏)
       - name: Disable Sleep
         run: |
           sudo systemsetup -setcomputersleep Never
           sudo systemsetup -setdisplaysleep Never
-          echo "✅ 已禁止休眠"
+          sudo defaults write /Library/Preferences/com.apple.screensaver loginWindowIdleTime 0
 
-      # 3. 启动截屏监控 (让你能看到画面)
-      - name: Start Screenshot Server
+      # 4. 启动 VNC 服务 (允许 adminuser)
+      - name: Start VNC
         run: |
-          pip3 install flask --break-system-packages
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+          -activate -configure -access -on -restart -agent -privs -all -allowAccessFor -allUsers
           
-          cat << 'EOF' > screen_server.py
-          from flask import Flask, send_file
-          import subprocess
-          
-          app = Flask(__name__)
-          
-          @app.route('/')
-          def index():
-              return '''
-              <html>
-                <head><meta http-equiv="refresh" content="2"></head>
-                <body style="background:#222;color:#fff;text-align:center;">
-                  <h1>Electron 运行监控</h1>
-                  <p>👇 你的软件窗口应该显示在下面 👇</p>
-                  <img src="/shot" style="max-width:95%; border:2px solid #fff;">
-                </body>
-              </html>
-              '''
-          
-          @app.route('/shot')
-          def shot():
-              # 截屏
-              subprocess.run(['screencapture', '-x', 'screen.png'])
-              return send_file('screen.png')
-          
-          if __name__ == '__main__':
-              app.run(host='0.0.0.0', port=8080)
-          EOF
-          
-          python3 screen_server.py &
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+          -configure -users adminuser -access -on -privs -all
 
-      # 4. 启动 Cloudflare (给你观看链接)
-      - name: Start Cloudflare Tunnel
+      # 5. 启动 Ngrok (让你能连进去)
+      - name: Start Ngrok Tunnel
+        env:
+          NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
         run: |
-          brew install cloudflared
-          cloudflared tunnel --url http://localhost:8080 > tunnel.log 2>&1 &
+          brew install ngrok/ngrok/ngrok
+          ngrok tcp 5900 --log=stdout > ngrok.log &
           sleep 10
           echo "========================================================"
-          echo "🎉 观看链接："
-          grep -o 'https://.*\.trycloudflare.com' tunnel.log | head -n 1
+          echo "🚀 RealVNC 连接地址："
+          grep -o "tcp://.*:[0-9]*" ngrok.log
+          echo "👤 用户名: adminuser"
+          echo "🔑 密  码: 123456"
           echo "========================================================"
 
-      # 5. 【核心修复】直接启动 Electron (避开 chcp 报错)
-      - name: Install & Run Electron
+      # 6. 【关键】修复 Windows 命令并准备环境
+      # 我们不在脚本里直接启动 Electron，而是把环境修好，等你连进去自己点
+      - name: Fix package.json for Mac
         run: |
-          echo "🚀 正在安装依赖..."
+          # 删掉 package.json 里导致报错的 "chcp 65001"
+          sed -i '' 's/chcp 65001 && //g' package.json
+          
+          # 安装依赖
           npm install
           
-          echo "🚀 正在启动 Electron..."
-          
-          # 🔴 关键修改：
-          # 不再使用 npm start (因为它包含 Windows 命令 chcp)
-          # 我们直接调用 electron 二进制文件
-          ./node_modules/.bin/electron . &
-          
-          echo "✅ 启动命令已发送！请去网页查看画面。"
+          # 安装打包工具 (electron-builder)
+          npm install --save-dev electron-builder
 
-      # 6. 保持运行
+      # 7. 保持运行 (等你连进来操作)
       - name: Keep Alive
         run: sleep 21600
