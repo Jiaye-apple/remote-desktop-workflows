@@ -1,4 +1,4 @@
-name: Build-Run-Fix
+name: Build-Run-Remote-Pro
 on: workflow_dispatch
 
 jobs:
@@ -33,12 +33,13 @@ jobs:
             sed -i '' 's/chcp 65001 && //g' package.json
           fi
 
-      # 4. 启动网页遥控器
+      # 4. 【核心升级】启动支持右键和双击的遥控器
       - name: Start Remote Controller
         run: |
           cat << 'EOF' > remote_server.py
           from flask import Flask, send_file, request
           import subprocess
+          import urllib.parse
           
           app = Flask(__name__)
           
@@ -47,39 +48,95 @@ jobs:
               return '''
               <html>
               <head>
-                  <title>Mac 调试遥控器</title>
+                  <title>Mac 全能遥控器</title>
                   <meta charset="utf-8">
                   <style>
                       body { background: #222; text-align: center; color: white; margin: 0; font-family: sans-serif; }
-                      #screen { cursor: crosshair; border: 2px solid cyan; max-width: 95%; margin-top: 10px;}
-                      .controls { padding: 10px; background: #333; }
-                      button { padding: 8px 15px; background: #444; color: white; border: 1px solid #777; cursor: pointer; border-radius: 4px; }
+                      #screen-box { margin-top: 10px; display: inline-block; position: relative; border: 2px solid #555; }
+                      #screen { cursor: crosshair; max-width: 95%; display: block; }
+                      
+                      /* 控制栏样式 */
+                      .controls { padding: 10px; background: #333; border-bottom: 1px solid #444; position: sticky; top: 0; }
+                      .btn-group { display: inline-flex; gap: 5px; margin-right: 15px; }
+                      button { padding: 8px 12px; background: #444; color: #ccc; border: 1px solid #666; cursor: pointer; border-radius: 4px; font-size: 14px; }
+                      button:hover { background: #555; }
+                      
+                      /* 选中状态 */
+                      button.active { background: #007bff; color: white; border-color: #0056b3; font-weight: bold; }
+                      
+                      input { padding: 8px; border-radius: 4px; border: 1px solid #555; background: #111; color: white; width: 150px; }
                   </style>
               </head>
               <body>
                   <div class="controls">
-                      <button onclick="setMode('click')">🖱️ 点击</button>
-                      <button onclick="setMode('type')">⌨️ 输入文字</button>
-                      <span id="status" style="margin-left:10px; color:#0f0;">🟢 实时监控中</span>
+                      <div class="btn-group">
+                          <button id="btn-click" class="active" onclick="setMode('click')">🖱️ 左键</button>
+                          <button id="btn-double" onclick="setMode('double')">🖱️🖱️ 双击</button>
+                          <button id="btn-right" onclick="setMode('right')">🖱️ 右键</button>
+                      </div>
+                      
+                      <div class="btn-group">
+                          <input type="text" id="txtInput" placeholder="输入文字...">
+                          <button onclick="sendText()">⌨️ 发送</button>
+                          <button onclick="sendEnter()">↵ 回车</button>
+                      </div>
+                      
+                      <span id="status" style="margin-left:10px; color:#0f0; font-size: 12px;">🟢 准备就绪</span>
                   </div>
-                  <img id="screen" src="/shot" onclick="handleClick(event)">
+                  
+                  <div id="screen-box">
+                      <img id="screen" src="/shot" onclick="handleClick(event)">
+                  </div>
                   
                   <script>
                       const img = document.getElementById('screen');
+                      const status = document.getElementById('status');
+                      let currentMode = 'click'; // 默认左键模式
+                      
+                      // 1. 自动刷新画面 (1.5秒一次)
                       setInterval(() => { img.src = '/shot?t=' + new Date().getTime(); }, 1500);
                       
-                      function handleClick(event) {
-                          const rect = img.getBoundingClientRect();
-                          const x = Math.round((event.clientX - rect.left) * (img.naturalWidth / rect.width));
-                          const y = Math.round((event.clientY - rect.top) * (img.naturalHeight / rect.height));
-                          fetch(`/click?x=${x}&y=${y}`);
+                      // 2. 切换鼠标模式
+                      function setMode(mode) {
+                          currentMode = mode;
+                          // 更新按钮样式
+                          document.querySelectorAll('button').forEach(b => b.classList.remove('active'));
+                          if(mode === 'click') document.getElementById('btn-click').classList.add('active');
+                          if(mode === 'double') document.getElementById('btn-double').classList.add('active');
+                          if(mode === 'right') document.getElementById('btn-right').classList.add('active');
+                          
+                          let modeName = mode === 'click' ? "左键" : (mode === 'double' ? "双击" : "右键");
+                          status.innerText = "🟡 当前模式: " + modeName + " (请点击屏幕)";
                       }
                       
-                      window.setMode = (m) => {
-                          if(m === 'type') {
-                              let t = prompt("输入文字:");
-                              if(t) fetch('/type?text=' + encodeURIComponent(t));
-                          }
+                      // 3. 处理点击事件
+                      function handleClick(event) {
+                          const rect = img.getBoundingClientRect();
+                          // 计算真实坐标
+                          const x = Math.round((event.clientX - rect.left) * (img.naturalWidth / rect.width));
+                          const y = Math.round((event.clientY - rect.top) * (img.naturalHeight / rect.height));
+                          
+                          status.innerText = `🚀 发送指令: ${currentMode} -> (${x}, ${y})`;
+                          
+                          // 发送给后端，带上 mode 参数
+                          fetch(`/action?mode=${currentMode}&x=${x}&y=${y}`)
+                              .then(() => {
+                                  // 如果是双击或右键，操作完自动切回左键，方便后续操作
+                                  if(currentMode !== 'click') {
+                                      setTimeout(() => setMode('click'), 1000);
+                                  }
+                              });
+                      }
+                      
+                      // 4. 发送文字
+                      function sendText() {
+                          const val = document.getElementById('txtInput').value;
+                          if(val) fetch('/type?text=' + encodeURIComponent(val));
+                      }
+                      
+                      // 5. 发送回车
+                      function sendEnter() {
+                          fetch('/key?k=return');
                       }
                   </script>
               </body>
@@ -91,17 +148,35 @@ jobs:
               subprocess.run(['screencapture', '-x', '-C', 'screen.png'])
               return send_file('screen.png')
           
-          @app.route('/click')
-          def click():
+          # 统一处理鼠标动作
+          @app.route('/action')
+          def action():
+              mode = request.args.get('mode')
               x = request.args.get('x')
               y = request.args.get('y')
-              subprocess.run(['cliclick', f'c:{x},{y}'])
+              
+              cmd = ''
+              if mode == 'click':
+                  cmd = f'c:{x},{y}'   # 单击
+              elif mode == 'double':
+                  cmd = f'dc:{x},{y}'  # 双击 (Double Click)
+              elif mode == 'right':
+                  cmd = f'rc:{x},{y}'  # 右键 (Right Click)
+                  
+              print(f"Executing: {cmd}")
+              subprocess.run(['cliclick', cmd])
               return "ok"
 
           @app.route('/type')
           def type_text():
               text = request.args.get('text')
               subprocess.run(['cliclick', f't:{text}'])
+              return "ok"
+              
+          @app.route('/key')
+          def key_press():
+              k = request.args.get('k')
+              subprocess.run(['cliclick', f'kp:{k}'])
               return "ok"
           
           if __name__ == '__main__':
@@ -119,7 +194,7 @@ jobs:
           grep -o 'https://.*\.trycloudflare.com' tunnel.log | head -n 1
           echo "========================================================"
 
-      # 6. 【核心修复】构建并运行
+      # 6. 构建并运行 (保留你之前的配置)
       - name: Build and Run
         run: |
           echo "🚀 安装依赖..."
@@ -127,14 +202,12 @@ jobs:
           npm install --save-dev electron-builder
           
           echo "📦 正在构建 (生成可运行的 .app)..."
-          # 🔴 关键修改1：使用 --dir 参数，强制生成解压后的文件夹，而不是 zip
           ./node_modules/.bin/electron-builder --mac --x64 --dir
           
           echo "📂 查看构建结果："
           ls -R dist/mac/
           
           echo "🚀 正在启动应用..."
-          # 找到 .app 文件
           APP_PATH=$(find dist/mac -name "*.app" | head -n 1)
           
           if [ -z "$APP_PATH" ]; then
@@ -142,7 +215,6 @@ jobs:
             exit 1
           else
             echo "✅ 找到应用: $APP_PATH"
-            # 🔴 关键修改2：去掉 -a，直接 open 文件路径
             open "$APP_PATH"
           fi
 
