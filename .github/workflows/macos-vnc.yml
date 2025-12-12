@@ -1,4 +1,4 @@
-name: Run-From-Git
+name: Mac-Electron-Fix-Chcp
 on: workflow_dispatch
 
 jobs:
@@ -7,15 +7,13 @@ jobs:
     timeout-minutes: 360
     
     steps:
-      # 1. 【核心修改】直接拉取别人的仓库
-      # 这一步会把你指定的仓库代码全部下载到云端 Mac 上
+      # 1. 拉取你的仓库
       - name: Checkout Target Repository
         uses: actions/checkout@v3
         with:
           repository: Jiaye-apple/wf--my-electron-app
-          # 如果是私有仓库，还需要 token，但公共仓库直接填名字就行
 
-      # 2. 禁止休眠 (防止黑屏)
+      # 2. 禁止休眠
       - name: Disable Sleep
         run: |
           sudo systemsetup -setcomputersleep Never
@@ -25,10 +23,8 @@ jobs:
       # 3. 启动截屏监控 (让你能看到画面)
       - name: Start Screenshot Server
         run: |
-          # 安装 Flask (强制忽略系统限制)
           pip3 install flask --break-system-packages
           
-          # 创建监控脚本
           cat << 'EOF' > screen_server.py
           from flask import Flask, send_file
           import subprocess
@@ -41,7 +37,7 @@ jobs:
               <html>
                 <head><meta http-equiv="refresh" content="2"></head>
                 <body style="background:#222;color:#fff;text-align:center;">
-                  <h1>wf--my-electron-app 运行监控</h1>
+                  <h1>Electron 运行监控</h1>
                   <p>👇 你的软件窗口应该显示在下面 👇</p>
                   <img src="/shot" style="max-width:95%; border:2px solid #fff;">
                 </body>
@@ -50,7 +46,7 @@ jobs:
           
           @app.route('/shot')
           def shot():
-              # 截取屏幕
+              # 截屏
               subprocess.run(['screencapture', '-x', 'screen.png'])
               return send_file('screen.png')
           
@@ -58,10 +54,9 @@ jobs:
               app.run(host='0.0.0.0', port=8080)
           EOF
           
-          # 后台启动监控
           python3 screen_server.py &
 
-      # 4. 启动 Cloudflare (生成观看链接)
+      # 4. 启动 Cloudflare (给你观看链接)
       - name: Start Cloudflare Tunnel
         run: |
           brew install cloudflared
@@ -72,18 +67,20 @@ jobs:
           grep -o 'https://.*\.trycloudflare.com' tunnel.log | head -n 1
           echo "========================================================"
 
-      # 5. 【自动运行】安装依赖并启动 Electron
+      # 5. 【核心修复】直接启动 Electron (避开 chcp 报错)
       - name: Install & Run Electron
         run: |
-          echo "📂 当前目录文件检查："
-          ls -la
-          
-          echo "🚀 正在安装依赖 (npm install)..."
+          echo "🚀 正在安装依赖..."
           npm install
           
           echo "🚀 正在启动 Electron..."
-          # 使用 & 让它在后台运行
-          npm start &
+          
+          # 🔴 关键修改：
+          # 不再使用 npm start (因为它包含 Windows 命令 chcp)
+          # 我们直接调用 electron 二进制文件
+          ./node_modules/.bin/electron . &
+          
+          echo "✅ 启动命令已发送！请去网页查看画面。"
 
       # 6. 保持运行
       - name: Keep Alive
