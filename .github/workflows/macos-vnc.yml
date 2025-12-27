@@ -20,773 +20,121 @@ jobs:
         with:
           node-version: 18
 
-      - name: Install Tools
+      # 2. 安装VNC和远程控制工具
+      - name: Install VNC Tools
         run: |
-          brew install cliclick cloudflared
-          python3 -m pip install flask --break-system-packages
+          brew install cloudflared
+          
+          # 安装noVNC (网页VNC客户端)
+          git clone --depth 1 https://github.com/novnc/noVNC.git /tmp/noVNC
+          
+          # 安装websockify (WebSocket到TCP代理)
+          pip3 install websockify --break-system-packages
+          
+          # 安装cliclick用于鼠标/键盘控制
+          brew install cliclick
+          
+          echo "✅ VNC工具安装完成"
 
-      # 2. 防止黑屏：创建虚拟显示器并保持唤醒
-      - name: Setup Virtual Display
+      # 3. 启用macOS屏幕共享（VNC服务器）
+      - name: Enable Screen Sharing
         run: |
-          # 启动caffeinate防止系统休眠，-d防止显示器休眠，-i防止空闲休眠
+          # 设置VNC密码
+          VNC_PASSWORD="remote123"
+          
+          # 启用macOS内置的屏幕共享服务
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate -configure -access -on \
+            -clientopts -setvnclegacy -vnclegacy yes \
+            -clientopts -setvncpw -vncpw "$VNC_PASSWORD" \
+            -restart -agent -privs -all
+          
+          # 确保屏幕共享服务启动
+          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
+          
+          # 防止系统休眠
           caffeinate -d -i -u &
           echo $! > /tmp/caffeinate.pid
           
           # 禁用屏保
           defaults write com.apple.screensaver idleTime 0
           
-          # 唤醒显示系统
-          killall SystemUIServer 2>/dev/null || true
+          # 等待VNC服务启动
+          sleep 5
           
-          # 设置分辨率（GitHub Actions macOS使用虚拟显示器，固定1680x1050）
-          echo "虚拟显示器设置完成"
+          # 检查VNC端口
+          if lsof -i :5900 > /dev/null 2>&1; then
+            echo "✅ VNC服务器已启动 (端口5900)"
+          else
+            echo "⚠️ VNC端口未监听，尝试备用方案..."
+            # 备用方案：使用x11vnc
+            brew install x11vnc || true
+            x11vnc -display :0 -forever -shared -rfbport 5900 -passwd "$VNC_PASSWORD" &
+            sleep 3
+          fi
+          
+          echo "VNC密码: $VNC_PASSWORD"
 
-      # 3. 启动全功能遥控器（支持键盘、鼠标、快捷键等）
-      - name: Start Remote Monitor
+      # 4. 启动noVNC网页服务
+      - name: Start noVNC Web Server
         run: |
-          cat << 'SERVEREOF' > remote_server.py
-          # -*- coding: utf-8 -*-
-          """
-          macOS 远程遥控器 - 全功能版
-          支持: 截屏/键盘输入/鼠标操作/特殊按键/快捷键组合
-          """
-          from flask import Flask, send_file, request, jsonify, Response
-          import subprocess, os, re, time, json
-
-          app = Flask(__name__)
-
-          # 固定分辨率 - GitHub Actions macOS虚拟显示器
-          SCREEN_W, SCREEN_H = 1680, 1050
-
-          def get_actual_res():
-              """获取实际分辨率，带缓存"""
-              global SCREEN_W, SCREEN_H
-              try:
-                  out = subprocess.check_output(
-                      "system_profiler SPDisplaysDataType 2>/dev/null | grep -i resolution",
-                      shell=True, timeout=5
-                  ).decode()
-                  match = re.search(r'(\d+)\s*x\s*(\d+)', out)
-                  if match:
-                      SCREEN_W = int(match.group(1))
-                      SCREEN_H = int(match.group(2))
-              except: pass
-              return SCREEN_W, SCREEN_H
-
-          # 特殊按键映射表 (macOS key codes)
-          KEY_CODES = {
-              'enter': 36, 'return': 36, 'tab': 48, 'space': 49,
-              'delete': 51, 'backspace': 51, 'escape': 53, 'esc': 53,
-              'up': 126, 'down': 125, 'left': 123, 'right': 124,
-              'home': 115, 'end': 119, 'pageup': 116, 'pagedown': 121,
-              'f1': 122, 'f2': 120, 'f3': 99, 'f4': 118, 'f5': 96,
-              'f6': 97, 'f7': 98, 'f8': 100, 'f9': 101, 'f10': 109,
-              'f11': 103, 'f12': 111
-          }
-
-          @app.route('/')
-          def index():
-              w, h = get_actual_res()
-              return f'''<!DOCTYPE html>
-          <html lang="zh-CN">
-          <head>
-              <meta charset="UTF-8">
-              <meta name="viewport" content="width=device-width, initial-scale=1.0">
-              <title>macOS 远程控制中心</title>
-              <style>
-                  * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-                  body {{ 
-                      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-                      color: #fff; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-                      min-height: 100vh; overflow-x: hidden;
-                  }}
-                  
-                  /* 顶部控制栏 */
-                  .control-bar {{
-                      background: rgba(30, 30, 50, 0.95);
-                      backdrop-filter: blur(10px);
-                      padding: 12px 20px;
-                      position: fixed; top: 0; left: 0; right: 0;
-                      z-index: 1000;
-                      border-bottom: 1px solid rgba(100, 100, 255, 0.3);
-                      display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
-                  }}
-                  
-                  .control-group {{
-                      display: flex; gap: 6px; align-items: center;
-                      padding: 4px 10px;
-                      background: rgba(255,255,255,0.05);
-                      border-radius: 8px;
-                  }}
-                  .control-group label {{
-                      font-size: 11px; color: #888; margin-right: 4px;
-                  }}
-                  
-                  .btn {{
-                      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                      color: white; border: none; padding: 8px 14px;
-                      cursor: pointer; border-radius: 6px; font-size: 13px;
-                      transition: all 0.2s; font-weight: 500;
-                  }}
-                  .btn:hover {{ transform: translateY(-1px); box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4); }}
-                  .btn:active {{ transform: translateY(0); }}
-                  .btn-success {{ background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%); }}
-                  .btn-danger {{ background: linear-gradient(135deg, #eb3349 0%, #f45c43 100%); }}
-                  .btn-warning {{ background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); }}
-                  .btn-secondary {{ background: linear-gradient(135deg, #4b6cb7 0%, #182848 100%); }}
-                  .btn-small {{ padding: 5px 10px; font-size: 11px; }}
-                  
-                  input[type="text"] {{
-                      background: rgba(0,0,0,0.4); color: #fff;
-                      border: 1px solid rgba(255,255,255,0.2);
-                      padding: 8px 12px; border-radius: 6px; width: 180px;
-                      font-size: 13px;
-                  }}
-                  input[type="text"]:focus {{
-                      outline: none; border-color: #667eea;
-                      box-shadow: 0 0 10px rgba(102, 126, 234, 0.3);
-                  }}
-                  
-                  /* 屏幕显示区域 */
-                  .screen-wrapper {{
-                      margin-top: 130px; /* 给控制栏留空间 */
-                      padding: 15px;
-                      display: flex; justify-content: center;
-                  }}
-                  
-                  .screen-container {{
-                      position: relative;
-                      border: 2px solid rgba(100, 100, 255, 0.4);
-                      border-radius: 12px;
-                      overflow: hidden;
-                      box-shadow: 0 10px 40px rgba(0,0,0,0.5);
-                      background: #000;
-                  }}
-                  
-                  #screen {{
-                      display: block;
-                      max-width: 100%;
-                      max-height: calc(100vh - 180px);
-                      cursor: crosshair;
-                  }}
-                  
-                  /* 状态栏 */
-                  .status-bar {{
-                      position: fixed; bottom: 0; left: 0; right: 0;
-                      background: rgba(20, 20, 40, 0.95);
-                      padding: 8px 20px;
-                      display: flex; justify-content: space-between; align-items: center;
-                      font-size: 12px; color: #888;
-                      border-top: 1px solid rgba(100, 100, 255, 0.2);
-                  }}
-                  .status-item {{ display: flex; align-items: center; gap: 8px; }}
-                  .status-dot {{ width: 8px; height: 8px; border-radius: 50%; background: #38ef7d; }}
-                  
-                  /* 键盘面板 */
-                  .keyboard-panel {{
-                      display: none; position: fixed;
-                      top: 50%; left: 50%; transform: translate(-50%, -50%);
-                      background: rgba(30, 30, 50, 0.98);
-                      padding: 20px; border-radius: 12px;
-                      z-index: 2000;
-                      box-shadow: 0 20px 60px rgba(0,0,0,0.8);
-                      border: 1px solid rgba(100, 100, 255, 0.3);
-                  }}
-                  .keyboard-panel.show {{ display: block; }}
-                  .keyboard-row {{ display: flex; gap: 6px; margin-bottom: 6px; justify-content: center; }}
-                  .key-btn {{
-                      min-width: 40px; height: 40px;
-                      background: rgba(60, 60, 80, 0.9);
-                      border: 1px solid rgba(100, 100, 255, 0.3);
-                      color: #fff; border-radius: 6px; cursor: pointer;
-                      font-size: 12px; transition: all 0.15s;
-                  }}
-                  .key-btn:hover {{ background: rgba(102, 126, 234, 0.6); }}
-                  .key-btn:active {{ transform: scale(0.95); }}
-                  .key-wide {{ min-width: 80px; }}
-                  .key-space {{ min-width: 200px; }}
-                  
-                  /* 提示信息 */
-                  .toast {{
-                      position: fixed; bottom: 60px; left: 50%;
-                      transform: translateX(-50%);
-                      background: rgba(102, 126, 234, 0.9);
-                      padding: 10px 20px; border-radius: 20px;
-                      font-size: 13px; z-index: 3000;
-                      opacity: 0; transition: opacity 0.3s;
-                  }}
-                  .toast.show {{ opacity: 1; }}
-              </style>
-          </head>
-          <body>
-              <!-- 顶部控制栏 -->
-              <div class="control-bar">
-                  <!-- 文字输入 -->
-                  <div class="control-group">
-                      <label>📝 文字</label>
-                      <input type="text" id="textInput" placeholder="输入文字..." onkeydown="if(event.key==='Enter')sendText()">
-                      <button class="btn btn-small" onclick="sendText()">发送</button>
-                  </div>
-                  
-                  <!-- 常用按键 -->
-                  <div class="control-group">
-                      <label>⌨️ 按键</label>
-                      <button class="btn btn-success btn-small" onclick="sendKey('enter')">Enter</button>
-                      <button class="btn btn-secondary btn-small" onclick="sendKey('tab')">Tab</button>
-                      <button class="btn btn-secondary btn-small" onclick="sendKey('escape')">Esc</button>
-                      <button class="btn btn-danger btn-small" onclick="sendKey('backspace')">⌫</button>
-                      <button class="btn btn-secondary btn-small" onclick="sendKey('space')">Space</button>
-                  </div>
-                  
-                  <!-- 方向键 -->
-                  <div class="control-group">
-                      <label>🎮 方向</label>
-                      <button class="btn btn-secondary btn-small" onclick="sendKey('up')">↑</button>
-                      <button class="btn btn-secondary btn-small" onclick="sendKey('down')">↓</button>
-                      <button class="btn btn-secondary btn-small" onclick="sendKey('left')">←</button>
-                      <button class="btn btn-secondary btn-small" onclick="sendKey('right')">→</button>
-                  </div>
-                  
-                  <!-- 快捷键 -->
-                  <div class="control-group">
-                      <label>⚡ 快捷键</label>
-                      <button class="btn btn-warning btn-small" onclick="sendShortcut('cmd', 'c')">⌘C</button>
-                      <button class="btn btn-warning btn-small" onclick="sendShortcut('cmd', 'v')">⌘V</button>
-                      <button class="btn btn-warning btn-small" onclick="sendShortcut('cmd', 'a')">⌘A</button>
-                      <button class="btn btn-warning btn-small" onclick="sendShortcut('cmd', 'z')">⌘Z</button>
-                      <button class="btn btn-warning btn-small" onclick="sendShortcut('cmd', 's')">⌘S</button>
-                      <button class="btn btn-warning btn-small" onclick="sendShortcut('cmd', 'w')">⌘W</button>
-                  </div>
-                  
-                  <!-- 鼠标操作 -->
-                  <div class="control-group">
-                      <label>🖱️ 鼠标</label>
-                      <select id="mouseMode" style="background:#333;color:#fff;border:1px solid #555;padding:5px;border-radius:4px;">
-                          <option value="click">左键单击</option>
-                          <option value="dclick">左键双击</option>
-                          <option value="rclick">右键单击</option>
-                          <option value="mclick">中键单击</option>
-                          <option value="drag">拖拽模式</option>
-                      </select>
-                  </div>
-                  
-                  <!-- 刷新频率 -->
-                  <div class="control-group">
-                      <label>⏱️ 刷新</label>
-                      <select id="refreshRate" onchange="setRefreshRate(parseInt(this.value))" style="background:#333;color:#fff;border:1px solid #555;padding:5px;border-radius:4px;">
-                          <option value="500">500ms</option>
-                          <option value="1000" selected>1秒</option>
-                          <option value="2000">2秒</option>
-                          <option value="3000">3秒</option>
-                      </select>
-                  </div>
-                  
-                  <!-- 工具 -->
-                  <div class="control-group">
-                      <label>🔧</label>
-                      <button class="btn btn-secondary btn-small" id="keyboardModeBtn" onclick="toggleKeyboardMode()">键盘直通: 关</button>
-                      <button class="btn btn-secondary btn-small" onclick="toggleKeyboard()">虚拟键盘</button>
-                      <button class="btn btn-secondary btn-small" onclick="refreshScreen()">刷新</button>
-                  </div>
-              </div>
-              
-              <!-- 屏幕显示 -->
-              <div class="screen-wrapper">
-                  <div class="screen-container">
-                      <img id="screen" src="/shot" onclick="handleClick(event)" oncontextmenu="handleRightClick(event); return false;">
-                  </div>
-              </div>
-              
-              <!-- 状态栏 -->
-              <div class="status-bar">
-                  <div class="status-item">
-                      <span class="status-dot"></span>
-                      <span>已连接</span>
-                  </div>
-                  <div class="status-item">
-                      <span>分辨率: {w} x {h}</span>
-                      <span>|</span>
-                      <span>刷新间隔: <span id="refreshMs">1000</span>ms</span>
-                      <span>|</span>
-                      <span id="lastUpdate">等待更新...</span>
-                  </div>
-                  <div class="status-item">
-                      <span>点击坐标: <span id="clickPos">-</span></span>
-                  </div>
-              </div>
-              
-              <!-- 虚拟键盘面板 -->
-              <div class="keyboard-panel" id="keyboardPanel">
-                  <div class="keyboard-row">
-                      <button class="key-btn" onclick="sendKey('escape')">Esc</button>
-                      <button class="key-btn" onclick="sendKey('f1')">F1</button>
-                      <button class="key-btn" onclick="sendKey('f2')">F2</button>
-                      <button class="key-btn" onclick="sendKey('f3')">F3</button>
-                      <button class="key-btn" onclick="sendKey('f4')">F4</button>
-                      <button class="key-btn" onclick="sendKey('f5')">F5</button>
-                      <button class="key-btn" onclick="sendKey('f6')">F6</button>
-                      <button class="key-btn" onclick="sendKey('f7')">F7</button>
-                      <button class="key-btn" onclick="sendKey('f8')">F8</button>
-                      <button class="key-btn" onclick="sendKey('f9')">F9</button>
-                      <button class="key-btn" onclick="sendKey('f10')">F10</button>
-                      <button class="key-btn" onclick="sendKey('f11')">F11</button>
-                      <button class="key-btn" onclick="sendKey('f12')">F12</button>
-                  </div>
-                  <div class="keyboard-row">
-                      <button class="key-btn" onclick="sendChar('1')">1</button>
-                      <button class="key-btn" onclick="sendChar('2')">2</button>
-                      <button class="key-btn" onclick="sendChar('3')">3</button>
-                      <button class="key-btn" onclick="sendChar('4')">4</button>
-                      <button class="key-btn" onclick="sendChar('5')">5</button>
-                      <button class="key-btn" onclick="sendChar('6')">6</button>
-                      <button class="key-btn" onclick="sendChar('7')">7</button>
-                      <button class="key-btn" onclick="sendChar('8')">8</button>
-                      <button class="key-btn" onclick="sendChar('9')">9</button>
-                      <button class="key-btn" onclick="sendChar('0')">0</button>
-                      <button class="key-btn key-wide" onclick="sendKey('backspace')">⌫ Delete</button>
-                  </div>
-                  <div class="keyboard-row">
-                      <button class="key-btn key-wide" onclick="sendKey('tab')">Tab</button>
-                      <button class="key-btn" onclick="sendChar('q')">Q</button>
-                      <button class="key-btn" onclick="sendChar('w')">W</button>
-                      <button class="key-btn" onclick="sendChar('e')">E</button>
-                      <button class="key-btn" onclick="sendChar('r')">R</button>
-                      <button class="key-btn" onclick="sendChar('t')">T</button>
-                      <button class="key-btn" onclick="sendChar('y')">Y</button>
-                      <button class="key-btn" onclick="sendChar('u')">U</button>
-                      <button class="key-btn" onclick="sendChar('i')">I</button>
-                      <button class="key-btn" onclick="sendChar('o')">O</button>
-                      <button class="key-btn" onclick="sendChar('p')">P</button>
-                  </div>
-                  <div class="keyboard-row">
-                      <button class="key-btn" onclick="sendChar('a')">A</button>
-                      <button class="key-btn" onclick="sendChar('s')">S</button>
-                      <button class="key-btn" onclick="sendChar('d')">D</button>
-                      <button class="key-btn" onclick="sendChar('f')">F</button>
-                      <button class="key-btn" onclick="sendChar('g')">G</button>
-                      <button class="key-btn" onclick="sendChar('h')">H</button>
-                      <button class="key-btn" onclick="sendChar('j')">J</button>
-                      <button class="key-btn" onclick="sendChar('k')">K</button>
-                      <button class="key-btn" onclick="sendChar('l')">L</button>
-                      <button class="key-btn key-wide" onclick="sendKey('enter')">Enter ↵</button>
-                  </div>
-                  <div class="keyboard-row">
-                      <button class="key-btn" onclick="sendChar('z')">Z</button>
-                      <button class="key-btn" onclick="sendChar('x')">X</button>
-                      <button class="key-btn" onclick="sendChar('c')">C</button>
-                      <button class="key-btn" onclick="sendChar('v')">V</button>
-                      <button class="key-btn" onclick="sendChar('b')">B</button>
-                      <button class="key-btn" onclick="sendChar('n')">N</button>
-                      <button class="key-btn" onclick="sendChar('m')">M</button>
-                      <button class="key-btn" onclick="sendChar(',')">，</button>
-                      <button class="key-btn" onclick="sendChar('.')">。</button>
-                  </div>
-                  <div class="keyboard-row">
-                      <button class="key-btn key-wide" onclick="sendShortcut('cmd','')">⌘ Cmd</button>
-                      <button class="key-btn key-space" onclick="sendKey('space')">Space</button>
-                      <button class="key-btn" onclick="sendKey('up')">↑</button>
-                      <button class="key-btn" onclick="sendKey('left')">←</button>
-                      <button class="key-btn" onclick="sendKey('down')">↓</button>
-                      <button class="key-btn" onclick="sendKey('right')">→</button>
-                  </div>
-                  <div style="text-align:center;margin-top:15px;">
-                      <button class="btn btn-danger" onclick="toggleKeyboard()">关闭键盘</button>
-                  </div>
-              </div>
-              
-              <!-- 提示消息 -->
-              <div class="toast" id="toast"></div>
-              
-              <script>
-                  /* ========================================
-                   * macOS 远程控制 - Windows浏览器兼容版
-                   * 支持: Chrome/Edge/Firefox on Windows
-                   * ======================================== */
-                  
-                  const W = {w}, H = {h};
-                  let refreshInterval = null;
-                  let refreshMs = 1000;
-                  let keyboardMode = false;  // 键盘直通模式
-                  let isDragging = false;    // 拖拽状态
-                  let dragStartPos = null;   // 拖拽起始位置
-                  
-                  // ========== 屏幕刷新 ==========
-                  function startRefresh() {{
-                      if (refreshInterval) clearInterval(refreshInterval);
-                      refreshInterval = setInterval(function() {{
-                          var img = document.getElementById("screen");
-                          img.src = "/shot?t=" + Date.now();
-                          document.getElementById("lastUpdate").textContent = new Date().toLocaleTimeString();
-                      }}, refreshMs);
-                  }}
-                  startRefresh();
-                  
-                  function refreshScreen() {{
-                      document.getElementById("screen").src = "/shot?t=" + Date.now();
-                      showToast("屏幕已刷新");
-                  }}
-                  
-                  // 调整刷新频率
-                  function setRefreshRate(ms) {{
-                      refreshMs = ms;
-                      document.getElementById("refreshMs").textContent = ms;
-                      startRefresh();
-                      showToast("刷新间隔: " + ms + "ms");
-                  }}
-                  
-                  // ========== 鼠标操作 ==========
-                  function getMousePos(e) {{
-                      var rect = e.target.getBoundingClientRect();
-                      var xr = (e.clientX - rect.left) / rect.width;
-                      var yr = (e.clientY - rect.top) / rect.height;
-                      // 边界检查
-                      xr = Math.max(0, Math.min(1, xr));
-                      yr = Math.max(0, Math.min(1, yr));
-                      return {{ xr: xr, yr: yr, x: Math.round(xr * W), y: Math.round(yr * H) }};
-                  }}
-                  
-                  function handleClick(e) {{
-                      var pos = getMousePos(e);
-                      var mode = document.getElementById("mouseMode").value;
-                      document.getElementById("clickPos").textContent = pos.x + ", " + pos.y;
-                      
-                      fetch("/ctl?a=" + mode + "&x=" + pos.xr + "&y=" + pos.yr)
-                          .then(function() {{ showToast(mode + " @ (" + pos.x + ", " + pos.y + ")"); }});
-                  }}
-                  
-                  // 右键点击 (Windows浏览器兼容)
-                  function handleRightClick(e) {{
-                      e.preventDefault();
-                      e.stopPropagation();
-                      var pos = getMousePos(e);
-                      
-                      fetch("/ctl?a=rclick&x=" + pos.xr + "&y=" + pos.yr)
-                          .then(function() {{ showToast("右键 @ (" + pos.x + ", " + pos.y + ")"); }});
-                      return false;
-                  }}
-                  
-                  // 鼠标滚轮 (Windows浏览器兼容)
-                  function handleWheel(e) {{
-                      e.preventDefault();
-                      var pos = getMousePos(e);
-                      // Windows和Mac滚轮方向可能相反，这里统一处理
-                      var delta = e.deltaY || e.wheelDelta || -e.detail;
-                      var direction = delta > 0 ? "down" : "up";
-                      var amount = Math.min(Math.abs(delta), 100);
-                      
-                      fetch("/ctl?a=scroll&x=" + pos.xr + "&y=" + pos.yr + "&d=" + direction + "&n=" + amount)
-                          .then(function() {{ showToast("滚动 " + direction); }});
-                  }}
-                  
-                  // 拖拽操作
-                  function handleMouseDown(e) {{
-                      if (e.button === 0 && document.getElementById("mouseMode").value === "drag") {{
-                          isDragging = true;
-                          dragStartPos = getMousePos(e);
-                          e.preventDefault();
-                      }}
-                  }}
-                  
-                  function handleMouseUp(e) {{
-                      if (isDragging && dragStartPos) {{
-                          var endPos = getMousePos(e);
-                          fetch("/ctl?a=drag&x1=" + dragStartPos.xr + "&y1=" + dragStartPos.yr + 
-                                "&x2=" + endPos.xr + "&y2=" + endPos.yr)
-                              .then(function() {{ 
-                                  showToast("拖拽: (" + dragStartPos.x + "," + dragStartPos.y + ") → (" + endPos.x + "," + endPos.y + ")"); 
-                              }});
-                          isDragging = false;
-                          dragStartPos = null;
-                      }}
-                  }}
-                  
-                  // ========== 键盘输入 ==========
-                  function sendText() {{
-                      var input = document.getElementById("textInput");
-                      var v = input.value;
-                      if (!v) return;
-                      fetch("/ctl?a=type&v=" + encodeURIComponent(v))
-                          .then(function() {{
-                              showToast("已输入: " + v);
-                              input.value = "";
-                          }});
-                  }}
-                  
-                  function sendChar(c) {{
-                      fetch("/ctl?a=type&v=" + encodeURIComponent(c))
-                          .then(function() {{ showToast("按键: " + c); }});
-                  }}
-                  
-                  function sendKey(key) {{
-                      fetch("/ctl?a=key&k=" + key)
-                          .then(function() {{ showToast("按键: " + key.toUpperCase()); }});
-                  }}
-                  
-                  // 发送快捷键 (Windows Ctrl 自动映射为 macOS Cmd)
-                  function sendShortcut(mod, key) {{
-                      fetch("/ctl?a=shortcut&mod=" + mod + "&k=" + key)
-                          .then(function() {{ 
-                              var modSymbol = mod === 'cmd' ? '⌘' : (mod === 'ctrl' ? 'Ctrl+' : (mod === 'alt' ? '⌥' : '⇧'));
-                              showToast("快捷键: " + modSymbol + key.toUpperCase()); 
-                          }});
-                  }}
-                  
-                  // ========== UI控制 ==========
-                  function toggleKeyboard() {{
-                      document.getElementById("keyboardPanel").classList.toggle("show");
-                  }}
-                  
-                  function toggleKeyboardMode() {{
-                      keyboardMode = !keyboardMode;
-                      var btn = document.getElementById("keyboardModeBtn");
-                      if (keyboardMode) {{
-                          btn.style.background = "linear-gradient(135deg, #11998e 0%, #38ef7d 100%)";
-                          btn.textContent = "键盘直通: 开";
-                          showToast("键盘直通已开启 - 在网页上按键会发送到Mac");
-                      }} else {{
-                          btn.style.background = "";
-                          btn.textContent = "键盘直通: 关";
-                          showToast("键盘直通已关闭");
-                      }}
-                  }}
-                  
-                  function showToast(msg) {{
-                      var toast = document.getElementById("toast");
-                      toast.textContent = msg;
-                      toast.classList.add("show");
-                      setTimeout(function() {{ toast.classList.remove("show"); }}, 1500);
-                  }}
-                  
-                  // ========== 键盘事件监听 (Windows兼容) ==========
-                  document.addEventListener('keydown', function(e) {{
-                      // 如果焦点在输入框或select，不拦截
-                      var tag = document.activeElement.tagName;
-                      if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
-                      
-                      // Windows Ctrl+Key 自动映射为 macOS Cmd+Key
-                      if (e.ctrlKey && !e.altKey && !e.shiftKey) {{
-                          var key = e.key.toLowerCase();
-                          if (['c', 'v', 'x', 'a', 'z', 's', 'w', 'q', 'f', 'n', 'o', 'p'].indexOf(key) >= 0) {{
-                              e.preventDefault();
-                              sendShortcut('cmd', key);
-                              return;
-                          }}
-                      }}
-                      
-                      // 键盘直通模式：将所有按键发送到远程Mac
-                      if (keyboardMode) {{
-                          e.preventDefault();
-                          
-                          // 特殊按键映射
-                          var keyMap = {{
-                              'ArrowUp': 'up', 'ArrowDown': 'down', 'ArrowLeft': 'left', 'ArrowRight': 'right',
-                              'Enter': 'enter', 'Escape': 'escape', 'Backspace': 'backspace', 'Tab': 'tab',
-                              'Delete': 'delete', ' ': 'space', 'Home': 'home', 'End': 'end',
-                              'PageUp': 'pageup', 'PageDown': 'pagedown',
-                              'F1': 'f1', 'F2': 'f2', 'F3': 'f3', 'F4': 'f4', 'F5': 'f5', 'F6': 'f6',
-                              'F7': 'f7', 'F8': 'f8', 'F9': 'f9', 'F10': 'f10', 'F11': 'f11', 'F12': 'f12'
-                          }};
-                          
-                          if (keyMap[e.key]) {{
-                              sendKey(keyMap[e.key]);
-                          }} else if (e.key.length === 1) {{
-                              // 普通字符
-                              sendChar(e.key);
-                          }}
-                          return;
-                      }}
-                      
-                      // 非直通模式：只处理功能键
-                      var funcKeyMap = {{
-                          'ArrowUp': 'up', 'ArrowDown': 'down', 'ArrowLeft': 'left', 'ArrowRight': 'right',
-                          'Escape': 'escape'
-                      }};
-                      if (funcKeyMap[e.key]) {{
-                          e.preventDefault();
-                          sendKey(funcKeyMap[e.key]);
-                      }}
-                  }});
-                  
-                  // 阻止浏览器默认右键菜单
-                  document.getElementById("screen").addEventListener('contextmenu', function(e) {{
-                      e.preventDefault();
-                      return false;
-                  }});
-                  
-                  // 绑定滚轮事件 (兼容不同浏览器)
-                  var screenEl = document.getElementById("screen");
-                  if (screenEl.addEventListener) {{
-                      screenEl.addEventListener('wheel', handleWheel, {{ passive: false }});
-                      screenEl.addEventListener('mousedown', handleMouseDown);
-                      screenEl.addEventListener('mouseup', handleMouseUp);
-                  }}
-                  
-                  // 页面加载完成提示
-                  showToast("🎮 远程控制已就绪 - Windows兼容模式");
-              </script>
-          </body>
-          </html>'''
-
-          @app.route('/shot')
-          def shot():
-              """截屏并返回图片"""
-              img_path = os.path.join(os.getcwd(), 'screen.png')
-              try:
-                  # -C 显示鼠标指针, -x 静音, 捕获整个屏幕
-                  result = subprocess.run(
-                      ['screencapture', '-C', '-x', img_path],
-                      timeout=10, capture_output=True
-                  )
-                  if os.path.exists(img_path):
-                      return send_file(img_path, mimetype='image/png')
-              except Exception as e:
-                  print(f"截屏错误: {e}")
-              
-              # 如果截屏失败，返回一个提示图片
-              return Response("截屏失败", status=500)
-
-          @app.route('/ctl')
-          def ctl():
-              """处理控制命令"""
-              a = request.args.get('a', '')
-              w, h = get_actual_res()
-              
-              try:
-                  # 鼠标点击操作
-                  if a in ['click', 'dclick', 'rclick', 'mclick']:
-                      xr = float(request.args.get('x', 0))
-                      yr = float(request.args.get('y', 0))
-                      x, y = int(xr * w), int(yr * h)
-                      
-                      if a == 'click':
-                          subprocess.run(['cliclick', f'c:{x},{y}'], timeout=5)
-                      elif a == 'dclick':
-                          subprocess.run(['cliclick', f'dc:{x},{y}'], timeout=5)
-                      elif a == 'rclick':
-                          subprocess.run(['cliclick', f'rc:{x},{y}'], timeout=5)
-                      elif a == 'mclick':
-                          subprocess.run(['cliclick', f'tc:{x},{y}'], timeout=5)
-                  
-                  # 文字输入
-                  elif a == 'type':
-                      v = request.args.get('v', '')
-                      if v:
-                          # 转义特殊字符
-                          v = v.replace('\\', '\\\\').replace('"', '\\"')
-                          subprocess.run([
-                              'osascript', '-e', 
-                              f'tell application "System Events" to keystroke "{v}"'
-                          ], timeout=10)
-                  
-                  # 特殊按键
-                  elif a == 'key':
-                      k = request.args.get('k', '').lower()
-                      if k in KEY_CODES:
-                          code = KEY_CODES[k]
-                          subprocess.run([
-                              'osascript', '-e', 
-                              f'tell application "System Events" to key code {code}'
-                          ], timeout=5)
-                  
-                  # 快捷键组合
-                  elif a == 'shortcut':
-                      mod = request.args.get('mod', 'cmd')
-                      k = request.args.get('k', '')
-                      if k:
-                          mod_map = {{'cmd': 'command down', 'ctrl': 'control down', 'alt': 'option down', 'shift': 'shift down'}}
-                          modifier = mod_map.get(mod, 'command down')
-                          subprocess.run([
-                              'osascript', '-e', 
-                              f'tell application "System Events" to keystroke "{k}" using {{{modifier}}}'
-                          ], timeout=5)
-                  
-                  # 滚轮滚动 (使用cliclick或AppleScript)
-                  elif a == 'scroll':
-                      xr = float(request.args.get('x', 0.5))
-                      yr = float(request.args.get('y', 0.5))
-                      direction = request.args.get('d', 'down')
-                      amount = int(request.args.get('n', 3))
-                      x, y = int(xr * w), int(yr * h)
-                      
-                      # 先移动鼠标到位置
-                      subprocess.run(['cliclick', f'm:{x},{y}'], timeout=5)
-                      # 使用AppleScript模拟滚轮
-                      scroll_amount = amount if direction == 'down' else -amount
-                      subprocess.run([
-                          'osascript', '-e',
-                          f'tell application "System Events" to scroll area 1 by {{{scroll_amount}, 0}}'
-                      ], timeout=5, stderr=subprocess.DEVNULL)
-                  
-                  # 拖拽操作
-                  elif a == 'drag':
-                      x1r = float(request.args.get('x1', 0))
-                      y1r = float(request.args.get('y1', 0))
-                      x2r = float(request.args.get('x2', 0))
-                      y2r = float(request.args.get('y2', 0))
-                      x1, y1 = int(x1r * w), int(y1r * h)
-                      x2, y2 = int(x2r * w), int(y2r * h)
-                      
-                      # cliclick支持拖拽: dd=drag down, du=drag up
-                      subprocess.run(['cliclick', f'dd:{x1},{y1}', f'du:{x2},{y2}'], timeout=5)
-                  
-                  return jsonify(status="ok", action=a)
-              
-              except subprocess.TimeoutExpired:
-                  return jsonify(status="timeout", action=a), 500
-              except Exception as e:
-                  return jsonify(status="error", message=str(e)), 500
-
-          @app.route('/health')
-          def health():
-              """健康检查"""
-              w, h = get_actual_res()
-              return jsonify(status="ok", resolution=f"{w}x{h}")
-
-          if __name__ == '__main__':
-              print("=" * 50)
-              print("🎮 macOS 远程控制服务器启动中...")
-              print(f"📺 分辨率: {SCREEN_W} x {SCREEN_H}")
-              print("=" * 50)
-              
-              # 唤醒UI系统，防止黑屏
-              subprocess.run(['killall', 'SystemUIServer'], stderr=subprocess.DEVNULL)
-              
-              # 运行服务器
-              app.run(host='0.0.0.0', port=8080, threaded=True)
-          SERVEREOF
+          # 启动websockify，将WebSocket连接代理到VNC端口
+          cd /tmp/noVNC
+          ./utils/novnc_proxy --vnc localhost:5900 --listen 6080 > /tmp/novnc.log 2>&1 &
+          NOVNC_PID=$!
+          echo $NOVNC_PID > /tmp/novnc.pid
           
-          # 启动服务器
-          python3 remote_server.py > flask.log 2>&1 &
           sleep 3
           
-          # 启动Cloudflare隧道
-          cloudflared tunnel --url http://localhost:8080 > tunnel.log 2>&1 &
-          sleep 12
+          # 检查noVNC是否启动成功
+          if kill -0 $NOVNC_PID 2>/dev/null; then
+            echo "✅ noVNC网页服务已启动 (端口6080)"
+          else
+            echo "❌ noVNC启动失败"
+            cat /tmp/novnc.log
+            exit 1
+          fi
+
+      # 5. 创建Cloudflare隧道
+      - name: Create Cloudflare Tunnel
+        run: |
+          # 为noVNC创建隧道
+          cloudflared tunnel --url http://localhost:6080 > /tmp/tunnel.log 2>&1 &
+          TUNNEL_PID=$!
+          echo $TUNNEL_PID > /tmp/tunnel.pid
+          
+          # 等待隧道建立
+          sleep 15
+          
+          # 获取隧道URL
+          TUNNEL_URL=$(grep -o 'https://[a-zA-Z0-9\-]*\.trycloudflare\.com' /tmp/tunnel.log | head -n 1)
           
           echo ""
           echo "========================================="
-          echo "🎮 macOS 远程控制中心已启动"
+          echo "🖥️  macOS 远程桌面已就绪"
           echo "========================================="
           echo ""
-          echo "🌐 远程访问地址:"
-          grep -o 'https://.*\.trycloudflare.com' tunnel.log | head -n 1
+          echo "🌐 访问地址:"
+          echo "   $TUNNEL_URL/vnc.html"
           echo ""
-          echo "📋 支持的功能:"
-          echo "   ✅ 实时屏幕显示 (1秒自动刷新)"
-          echo "   ✅ 鼠标操作: 左键/右键/双击/中键"
-          echo "   ✅ 文字输入"
-          echo "   ✅ 特殊按键: Enter, Tab, Esc, Backspace, Space"
-          echo "   ✅ 方向键: ↑↓←→"
-          echo "   ✅ 快捷键组合: ⌘C, ⌘V, ⌘A, ⌘Z, ⌘S, ⌘W"
-          echo "   ✅ 虚拟键盘 (功能键F1-F12)"
-          echo "   ✅ 本地键盘快捷键支持"
+          echo "🔑 VNC密码: remote123"
           echo ""
-          echo "🔧 日志文件:"
-          echo "   - flask.log  (服务器日志)"
-          echo "   - tunnel.log (隧道日志)"
+          echo "📋 使用说明:"
+          echo "   1. 在Windows浏览器中打开上面的URL"
+          echo "   2. 点击 'Connect' 连接"
+          echo "   3. 输入密码: remote123"
+          echo "   4. 即可看到macOS桌面并进行操作"
+          echo ""
+          echo "⌨️ 快捷键提示:"
+          echo "   - Windows Ctrl = macOS Command"
+          echo "   - 可以直接使用鼠标点击和键盘输入"
+          echo ""
           echo "========================================="
+          
+          # 保存URL到文件方便后续查看
+          echo "$TUNNEL_URL/vnc.html" > /tmp/vnc_url.txt
 
-      # 4. 执行打包逻辑并启动应用
+      # 6. 执行打包逻辑并启动应用
       - name: Build and Launch
         run: |
           echo "🚀 安装依赖并修复编码..."
@@ -797,15 +145,42 @@ jobs:
           export CSC_IDENTITY_AUTO_DISCOVERY=false
           ./node_modules/.bin/electron-builder --mac --x64 --dir
 
-          echo "📂 启动应用 (启动后应用会出现在黑色桌面上)..."
+          echo "📂 启动应用..."
           APP_PATH=$(find dist/mac -name "*.app" -maxdepth 2 | head -n 1)
           if [ -n "$APP_PATH" ]; then
             open "$APP_PATH"
+            echo "✅ 应用已启动: $APP_PATH"
           else
             echo "❌ 未找到 .app 文件"
             ls -R dist/
             exit 1
           fi
+          
+          # 再次显示VNC URL
+          echo ""
+          echo "========================================="
+          echo "🖥️ VNC远程桌面地址:"
+          cat /tmp/vnc_url.txt 2>/dev/null || echo "查看上方日志获取URL"
+          echo "========================================="
 
+      # 7. 保持运行
       - name: Keep Alive
-        run: sleep 21600
+        run: |
+          echo "保持运行6小时..."
+          echo "VNC地址: $(cat /tmp/vnc_url.txt 2>/dev/null)"
+          
+          # 每5分钟输出一次状态
+          for i in $(seq 1 72); do
+            sleep 300
+            echo "[$i/72] 已运行 $((i*5)) 分钟 - VNC: $(cat /tmp/vnc_url.txt 2>/dev/null)"
+            
+            # 检查进程是否还活着
+            if ! kill -0 $(cat /tmp/tunnel.pid 2>/dev/null) 2>/dev/null; then
+              echo "⚠️ 隧道进程已退出，重新启动..."
+              cloudflared tunnel --url http://localhost:6080 > /tmp/tunnel.log 2>&1 &
+              echo $! > /tmp/tunnel.pid
+              sleep 10
+              grep -o 'https://.*\.trycloudflare.com' /tmp/tunnel.log | head -n 1 > /tmp/vnc_url_new.txt
+              echo "新VNC地址: $(cat /tmp/vnc_url_new.txt)/vnc.html"
+            fi
+          done
