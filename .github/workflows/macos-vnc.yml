@@ -25,89 +25,124 @@ jobs:
           brew install cliclick cloudflared
           python3 -m pip install flask --break-system-packages
 
-      # 2. 启动增强型遥控监控
+# 2. 启动监控 (V4 终极修复版：解决黑屏、显示不全、坐标偏移)
       - name: Start Remote Monitor
         run: |
           cat << 'EOF' > remote_server.py
           from flask import Flask, send_file, request, jsonify
-          import subprocess
-          import os
+          import subprocess, os, re
 
           app = Flask(__name__)
 
-          def get_res():
+          def get_actual_res():
               try:
-                  cmd = "system_profiler SPDisplaysDataType | grep Resolution"
-                  out = subprocess.check_output(cmd, shell=True).decode()
-                  res = [int(s) for s in out.replace('x', ' ').split() if s.isdigit()]
-                  return (res[0], res[1]) if len(res) >= 2 else (1280, 960)
-              except: return 1280, 960
+                  # 强制获取 macOS 虚拟显示器的真实物理分辨率
+                  out = subprocess.check_output("system_profiler SPDisplaysDataType | grep Resolution", shell=True).decode()
+                  match = re.search(r'(\d+) x (\d+)', out)
+                  if match: return int(match.group(1)), int(match.group(2))
+              except: pass
+              return 1280, 960
 
           @app.route('/')
           def index():
-              return '''
+              w, h = get_actual_res()
+              return f'''
               <html>
-              <head><title>macOS Remote</title><style>
-              body{background:#1a1a1a;color:white;text-align:center;font-family:sans-serif;}
-              .screen-container{position:relative;display:inline-block;margin-top:20px;border:3px solid #444;}
-              #screen{max-width:90vw;cursor:crosshair;}
-              .controls{background:#222;padding:15px;position:fixed;bottom:0;width:100%;display:flex;justify-content:center;gap:10px;}
-              input{padding:8px;background:#000;color:#fff;border:1px solid #444;width:200px;}
-              button{padding:8px 15px;background:#007bff;color:white;border:none;border-radius:4px;cursor:pointer;}
-              </style></head>
+              <head>
+                  <title>macOS Master Control</title>
+                  <style>
+                      body {{ background: #000; color: #00ff00; font-family: monospace; margin: 0; overflow: hidden; }}
+                      .top-bar {{ background: #222; padding: 10px; display: flex; gap: 15px; align-items: center; border-bottom: 1px solid #444; position: fixed; top:0; width:100%; z-index:100; }}
+                      .canvas-container {{ margin-top: 60px; width: 100vw; height: calc(100vh - 60px); overflow: auto; background: #111; }}
+                      #screen {{ border: 2px solid #555; display: block; }}
+                      .btn {{ background: #444; color: white; border: 1px solid #666; padding: 5px 10px; cursor: pointer; border-radius: 3px; }}
+                      .btn:hover {{ background: #666; }}
+                      .btn-primary {{ background: #007bff; border-color: #0056b3; }}
+                      #coord {{ color: #ffcc00; font-size: 12px; }}
+                  </style>
+              </head>
               <body>
-              <h3>macOS 远程操控面板</h3>
-              <div class="screen-container"><img id="screen" src="/shot" onclick="handle(event)"></div>
-              <div class="controls">
-                  <input type="text" id="ti" placeholder="输入文字...">
-                  <button onclick="send('type')">输入</button>
-                  <button onclick="send('enter')" style="background:#28a745;">回车</button>
-                  <button onclick="location.reload()" style="background:#555;">刷新</button>
-              </div>
-              <script>
-              setInterval(()=>{document.getElementById("screen").src="/shot?t="+new Date().getTime();},1500);
-              function handle(e){
-                  const i=document.getElementById("screen");const r=i.getBoundingClientRect();
-                  const x=(e.clientX-r.left)/r.width;const y=(e.clientY-r.top)/r.height;
-                  fetch(`/ctl?a=click&x=${x}&y=${y}`);
-              }
-              function send(t){
-                  const v=document.getElementById("ti").value;
-                  if(t==='type'){fetch(`/ctl?a=type&v=${encodeURIComponent(v)}`);document.getElementById("ti").value='';}
-                  else{fetch(`/ctl?a=enter`);}
-              }
-              </script></body></html>
+                  <div class="top-bar">
+                      <b>MAC-REMOTE V4</b>
+                      <input type="text" id="ti" placeholder="输入文字..." style="width:150px; background:#000; color:#fff; border:1px solid #555;">
+                      <button class="btn" onclick="send('type')">输入</button>
+                      <button class="btn btn-primary" onclick="send('enter')">回车(Enter)</button>
+                      <button class="btn" onclick="send('space')">空格</button>
+                      <button class="btn" onclick="send('cmd_v')" style="background:#d9534f">粘贴</button>
+                      <button class="btn" onclick="location.reload()">强制刷新</button>
+                      <div id="coord">X: 0, Y: 0 | Res: {w}x{h}</div>
+                  </div>
+                  <div class="canvas-container">
+                      <img id="screen" src="/shot" onclick="handleClick(event)" onmousemove="updateCoord(event)">
+                  </div>
+                  <script>
+                      const W = {w}; const H = {h};
+                      setInterval(() => {{
+                          document.getElementById("screen").src = "/shot?t=" + new Date().getTime();
+                      }}, 1000);
+
+                      function updateCoord(e) {{
+                          const rect = e.target.getBoundingClientRect();
+                          const x = Math.round((e.clientX - rect.left) * (W / rect.width));
+                          const y = Math.round((e.clientY - rect.top) * (H / rect.height));
+                          document.getElementById("coord").innerText = `X: ${{x}}, Y: ${{y}} | Res: ${{W}}x${{H}}`;
+                      }}
+
+                      function handleClick(e) {{
+                          const rect = e.target.getBoundingClientRect();
+                          const xr = (e.clientX - rect.left) / rect.width;
+                          const yr = (e.clientY - rect.top) / rect.height;
+                          fetch(`/ctl?a=click&x=${{xr}}&y=${{yr}}`);
+                      }}
+
+                      function send(t) {{
+                          const v = document.getElementById("ti").value;
+                          fetch(`/ctl?a=${{t}}&v=${{encodeURIComponent(v)}}`);
+                          if(t==='type') document.getElementById("ti").value = "";
+                      }}
+                  </script>
+              </body>
+              </html>
               '''
 
           @app.route('/shot')
           def shot():
-              subprocess.run(['screencapture', '-x', 'screen.png'])
-              return send_file('screen.png')
+              img_path = os.path.join(os.getcwd(), 'screen.png')
+              # -C 包含鼠标指针，-x 静音
+              subprocess.run(['screencapture', '-C', '-x', img_path])
+              return send_file(img_path)
 
           @app.route('/ctl')
           def ctl():
-              a = request.args.get('a'); w, h = get_res()
-              if a=='click':
-                  x, y = int(float(request.args.get('x'))*w), int(float(request.args.get('y'))*h)
+              a = request.args.get('a'); w, h = get_actual_res()
+              if a == 'click':
+                  x, y = int(float(request.args.get('x')) * w), int(float(request.args.get('y')) * h)
                   subprocess.run(['cliclick', f'c:{x},{y}'])
-              elif a=='type':
+              elif a == 'type':
                   v = request.args.get('v').replace('"', '\\"')
                   subprocess.run(['osascript', '-e', f'tell application "System Events" to keystroke "{v}"'])
-              elif a=='enter':
+              elif a == 'enter':
                   subprocess.run(['osascript', '-e', 'tell application "System Events" to key code 36'])
+              elif a == 'space':
+                  subprocess.run(['osascript', '-e', 'tell application "System Events" to key code 49'])
+              elif a == 'cmd_v':
+                  subprocess.run(['osascript', '-e', 'tell application "System Events" to keystroke "v" using {{command down}}'])
               return jsonify(s="ok")
 
           if __name__ == '__main__':
+              # 启动时先强制唤醒窗口管理器
+              subprocess.run(['killall', 'SystemUIServer'], stderr=subprocess.DEVNULL)
               app.run(host='0.0.0.0', port=8080)
           EOF
           python3 remote_server.py > flask.log 2>&1 &
           cloudflared tunnel --url http://localhost:8080 > tunnel.log 2>&1 &
-          sleep 8
+          
+          # 等待隧道链接
+          timeout 30s bash -c 'until grep -o "https://.*\.trycloudflare.com" tunnel.log; do sleep 1; done' || true
           echo "========================================="
-          echo "🎮 远程链接 (点击下方链接即可操作):"
+          echo "🎮 终极遥控面板链接："
           grep -o 'https://.*\.trycloudflare.com' tunnel.log | head -n 1
           echo "========================================="
-
       # 3. 打包与启动
       - name: Build and Launch
         run: |
