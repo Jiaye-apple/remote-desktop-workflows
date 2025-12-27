@@ -9,6 +9,7 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+        # 强制只拉取当前 wftest 仓库，不指向任何外部仓库
 
       - name: Setup Node and Python
         uses: actions/setup-node@v4
@@ -20,11 +21,6 @@ jobs:
           brew install cliclick cloudflared
           python3 -m pip install flask --break-system-packages
 
-      - name: Disable Sleep
-        run: |
-          sudo systemsetup -setcomputersleep Never || true
-          sudo systemsetup -setdisplaysleep Never || true
-
       - name: Start Remote Server
         run: |
           cat << 'EOF' > remote_server.py
@@ -34,7 +30,8 @@ jobs:
           @app.route('/')
           def index():
               return '''<html><body style="background:#222;color:white;text-align:center;">
-                  <h2>正在自动打包与安装...</h2>
+                  <h2>正在自动打包与安装监控...</h2>
+                  <div id="status" style="color:#0f0">系统运行中</div>
                   <img id="screen" src="/shot" style="max-width:90%;border:3px solid #555;" onclick="handleClick(event)">
                   <script>
                       const img = document.getElementById('screen');
@@ -63,29 +60,40 @@ jobs:
           cloudflared tunnel --url http://localhost:8080 > tunnel.log 2>&1 &
           sleep 10
           echo "========================================="
-          echo "遥控链接："
+          echo "🎮 遥控链接（在此监控进度）："
           grep -o 'https://.*\.trycloudflare.com' tunnel.log | head -n 1
           echo "========================================="
 
-      - name: Auto Install and Build
+      - name: Auto Find, Install and Build
         run: |
-          if [ -f "package.json" ]; then
-            sed -i '' 's/chcp 65001 && //g' package.json
-            npm install
-            export CSC_IDENTITY_AUTO_DISCOVERY=false
-            ./node_modules/.bin/electron-builder --mac --x64 --dir
-          else
-            echo "错误：未发现 package.json"
+          echo "🔎 正在全盘搜索 package.json..."
+          # 这一行是解决问题的关键：自动定位项目文件夹
+          TARGET_DIR=$(find . -name "package.json" -not -path "*/node_modules/*" | head -n 1 | xargs dirname)
+          
+          if [ -z "$TARGET_DIR" ]; then
+            echo "❌ 严重错误：仓库里根本没有 package.json 文件！"
+            ls -R
             exit 1
           fi
 
-      - name: Launch Application
-        run: |
+          echo "✅ 找到项目目录: $TARGET_DIR"
+          cd "$TARGET_DIR"
+
+          echo "🚀 执行安装与构建..."
+          sed -i '' 's/chcp 65001 && //g' package.json || true
+          npm install
+          
+          export CSC_IDENTITY_AUTO_DISCOVERY=false
+          ./node_modules/.bin/electron-builder --mac --x64 --dir
+
+          echo "📂 启动生成的应用..."
+          # 重新寻找生成的 .app 路径
           APP_PATH=$(find dist/mac -name "*.app" -maxdepth 2 | head -n 1)
           if [ -n "$APP_PATH" ]; then
             open "$APP_PATH"
           else
-            echo "错误：未找到构建好的应用"
+            echo "❌ 未找到 .app 文件，请检查打包日志"
+            ls -R dist/
             exit 1
           fi
 
