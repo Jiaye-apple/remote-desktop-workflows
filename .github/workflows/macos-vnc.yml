@@ -10,18 +10,18 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Setup Node
+      - name: Setup Node (Pure Mode)
         uses: actions/setup-node@v4
         with:
           node-version: 18
-          cache: 'npm'
+          # 删除了所有 cache 选项，不再让它自作聪明去检查 lock 文件
 
       - name: Install System Tools
         run: |
           brew install cliclick cloudflared
           python3 -m pip install flask --break-system-packages
 
-      # 1. 启动远程监控（让你能看到打包主体的全过程）
+      # 1. 启动监控（放在最前面，确保报错时你能连进去看屏幕）
       - name: Start Remote Monitor
         run: |
           cat << 'EOF' > remote_server.py
@@ -64,42 +64,31 @@ jobs:
           grep -o 'https://.*\.trycloudflare.com' tunnel.log | head -n 1
           echo "========================================="
 
-      # 2. 打包主体软件 (Root Directory)
-      - name: Build Main Application
+      # 2. 根目录直接安装并打包
+      - name: Build Root Project
         run: |
-          echo "🚀 正在安装主体软件依赖..."
+          echo "🚀 正在根目录执行安装..."
+          # 修复 Windows 可能存在的编码残留
+          sed -i '' 's/chcp 65001 && //g' package.json || true
+          
           npm install
           
-          echo "📦 正在打包主体软件..."
+          echo "📦 正在执行 Electron 打包..."
           export CSC_IDENTITY_AUTO_DISCOVERY=false
-          # 修复 Windows 可能遗留的编码命令
-          sed -i '' 's/chcp 65001 && //g' package.json || true
           ./node_modules/.bin/electron-builder --mac --x64 --dir
 
-      # 3. 处理插件/子项目 (WindsurfSwitch-main)
-      - name: Prepare Plugin (WindsurfSwitch-main)
+      # 3. 启动应用
+      - name: Launch App
         run: |
-          if [ -d "WindsurfSwitch-main" ]; then
-            echo "📂 进入插件目录进行处理..."
-            cd WindsurfSwitch-main
-            if [ -f "package.json" ]; then
-               npm install
-               # 如果插件需要独立 build，可以在这里加 npm run build
-            fi
-          fi
-
-      # 4. 启动主体程序
-      - name: Launch Main App
-        run: |
-          echo "📂 寻找主体程序运行路径..."
-          # 在根目录的 dist/mac 下寻找 .app
+          echo "📂 寻找生成的 .app..."
+          # 严格在根目录的 dist/mac 寻找
           APP_PATH=$(find dist/mac -name "*.app" -maxdepth 2 | head -n 1)
           
           if [ -n "$APP_PATH" ]; then
-            echo "✅ 启动主体软件: $APP_PATH"
+            echo "✅ 成功启动: $APP_PATH"
             open "$APP_PATH"
           else
-            echo "❌ 错误：主体软件打包失败，未发现 .app 文件"
+            echo "❌ 错误：未发现打包后的应用文件"
             ls -R dist/
             exit 1
           fi
