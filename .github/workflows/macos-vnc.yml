@@ -1,14 +1,14 @@
 name: Build-Full-Project
 
-# 1. 这里的格式必须绝对正确，按钮才会出现
 on:
-  workflow_dispatch: # 这个就是开启“手动运行按钮”的关键
+  workflow_dispatch: # 确保 GitHub 页面显示蓝色的 "Run workflow" 按钮
 
 jobs:
   build-and-run:
     runs-on: macos-latest
     timeout-minutes: 360
     steps:
+      # 1. 环境准备
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
@@ -25,7 +25,7 @@ jobs:
           brew install cliclick cloudflared
           python3 -m pip install flask --break-system-packages
 
-# 2. 启动监控 (V4 终极修复版：解决黑屏、显示不全、坐标偏移)
+      # 2. 启动全功能遥控器 (解决黑屏、分辨率对不上、操作无反应)
       - name: Start Remote Monitor
         run: |
           cat << 'EOF' > remote_server.py
@@ -51,42 +51,32 @@ jobs:
               <head>
                   <title>macOS Master Control</title>
                   <style>
-                      body {{ background: #000; color: #00ff00; font-family: monospace; margin: 0; overflow: hidden; }}
-                      .top-bar {{ background: #222; padding: 10px; display: flex; gap: 15px; align-items: center; border-bottom: 1px solid #444; position: fixed; top:0; width:100%; z-index:100; }}
-                      .canvas-container {{ margin-top: 60px; width: 100vw; height: calc(100vh - 60px); overflow: auto; background: #111; }}
-                      #screen {{ border: 2px solid #555; display: block; }}
-                      .btn {{ background: #444; color: white; border: 1px solid #666; padding: 5px 10px; cursor: pointer; border-radius: 3px; }}
-                      .btn:hover {{ background: #666; }}
-                      .btn-primary {{ background: #007bff; border-color: #0056b3; }}
-                      #coord {{ color: #ffcc00; font-size: 12px; }}
+                      body {{ background: #000; color: #fff; font-family: sans-serif; margin: 0; }}
+                      .top-bar {{ background: #222; padding: 10px; display: flex; gap: 10px; position: fixed; top:0; width:100%; z-index:100; border-bottom: 2px solid #007bff; }}
+                      .screen-container {{ margin-top: 60px; overflow: auto; width: 100vw; height: calc(100vh - 60px); }}
+                      #screen {{ border: 1px solid #444; cursor: crosshair; }}
+                      .btn {{ background: #007bff; color: white; border: none; padding: 8px 15px; cursor: pointer; border-radius: 4px; }}
+                      input {{ background: #000; color: #fff; border: 1px solid #444; padding: 8px; width: 200px; }}
+                      #info {{ color: #ffcc00; font-size: 12px; margin-left: 10px; }}
                   </style>
               </head>
               <body>
                   <div class="top-bar">
-                      <b>MAC-REMOTE V4</b>
-                      <input type="text" id="ti" placeholder="输入文字..." style="width:150px; background:#000; color:#fff; border:1px solid #555;">
+                      <input type="text" id="ti" placeholder="输入文字...">
                       <button class="btn" onclick="send('type')">输入</button>
-                      <button class="btn btn-primary" onclick="send('enter')">回车(Enter)</button>
-                      <button class="btn" onclick="send('space')">空格</button>
-                      <button class="btn" onclick="send('cmd_v')" style="background:#d9534f">粘贴</button>
-                      <button class="btn" onclick="location.reload()">强制刷新</button>
-                      <div id="coord">X: 0, Y: 0 | Res: {w}x{h}</div>
+                      <button class="btn" onclick="send('enter')" style="background:#28a745">回车</button>
+                      <button class="btn" onclick="send('cmd_v')" style="background:#d9534f">粘贴(Cmd+V)</button>
+                      <button class="btn" onclick="location.reload()" style="background:#666">强制刷新</button>
+                      <span id="info">分辨率: {w}x{h}</span>
                   </div>
-                  <div class="canvas-container">
-                      <img id="screen" src="/shot" onclick="handleClick(event)" onmousemove="updateCoord(event)">
+                  <div class="screen-container">
+                      <img id="screen" src="/shot" onclick="handleClick(event)">
                   </div>
                   <script>
                       const W = {w}; const H = {h};
                       setInterval(() => {{
                           document.getElementById("screen").src = "/shot?t=" + new Date().getTime();
-                      }}, 1000);
-
-                      function updateCoord(e) {{
-                          const rect = e.target.getBoundingClientRect();
-                          const x = Math.round((e.clientX - rect.left) * (W / rect.width));
-                          const y = Math.round((e.clientY - rect.top) * (H / rect.height));
-                          document.getElementById("coord").innerText = `X: ${{x}}, Y: ${{y}} | Res: ${{W}}x${{H}}`;
-                      }}
+                      }}, 1500);
 
                       function handleClick(e) {{
                           const rect = e.target.getBoundingClientRect();
@@ -108,7 +98,7 @@ jobs:
           @app.route('/shot')
           def shot():
               img_path = os.path.join(os.getcwd(), 'screen.png')
-              # -C 包含鼠标指针，-x 静音
+              # -C 显示鼠标指针, -x 静音
               subprocess.run(['screencapture', '-C', '-x', img_path])
               return send_file(img_path)
 
@@ -123,36 +113,42 @@ jobs:
                   subprocess.run(['osascript', '-e', f'tell application "System Events" to keystroke "{v}"'])
               elif a == 'enter':
                   subprocess.run(['osascript', '-e', 'tell application "System Events" to key code 36'])
-              elif a == 'space':
-                  subprocess.run(['osascript', '-e', 'tell application "System Events" to key code 49'])
               elif a == 'cmd_v':
                   subprocess.run(['osascript', '-e', 'tell application "System Events" to keystroke "v" using {{command down}}'])
               return jsonify(s="ok")
 
           if __name__ == '__main__':
-              # 启动时先强制唤醒窗口管理器
+              # 尝试唤醒 UI
               subprocess.run(['killall', 'SystemUIServer'], stderr=subprocess.DEVNULL)
               app.run(host='0.0.0.0', port=8080)
           EOF
           python3 remote_server.py > flask.log 2>&1 &
           cloudflared tunnel --url http://localhost:8080 > tunnel.log 2>&1 &
-          
-          # 等待隧道链接
-          timeout 30s bash -c 'until grep -o "https://.*\.trycloudflare.com" tunnel.log; do sleep 1; done' || true
+          sleep 10
           echo "========================================="
-          echo "🎮 终极遥控面板链接："
+          echo "🎮 远程控制面板 (全屏滚动+精准点击):"
           grep -o 'https://.*\.trycloudflare.com' tunnel.log | head -n 1
           echo "========================================="
-      # 3. 打包与启动
+
+      # 3. 执行打包逻辑并启动应用
       - name: Build and Launch
         run: |
+          echo "🚀 安装依赖并修复编码..."
           sed -i '' 's/chcp 65001 && //g' package.json || true
           npm install          
+          
+          echo "📦 打包中..."
           export CSC_IDENTITY_AUTO_DISCOVERY=false
           ./node_modules/.bin/electron-builder --mac --x64 --dir
+
+          echo "📂 启动应用 (启动后应用会出现在黑色桌面上)..."
           APP_PATH=$(find dist/mac -name "*.app" -maxdepth 2 | head -n 1)
           if [ -n "$APP_PATH" ]; then
             open "$APP_PATH"
+          else
+            echo "❌ 未找到 .app 文件"
+            ls -R dist/
+            exit 1
           fi
 
       - name: Keep Alive
