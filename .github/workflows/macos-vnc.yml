@@ -8,216 +8,109 @@ jobs:
     
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
-          repository: Jiaye-apple/wf--my-electron-app
+          # 默认拉取当前仓库，如果是外部仓库请取消下面一行的注释
+          # repository: Jiaye-apple/wf--my-electron-app
 
-      # 1. 安装遥控工具
-      - name: Install Tools
+      # 1. 环境初始化 (增加 Node.js 环境确保构建稳定)
+      - name: Setup Node and Python
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
+      - name: Install System Tools
         run: |
-          brew install cliclick
-          brew install cloudflared
-          pip3 install flask --break-system-packages
+          brew install cliclick cloudflared
+          python3 -m pip install flask --break-system-packages
 
-      # 2. 禁止休眠
+      # 2. 禁止休眠 (确保长延时任务不掉线)
       - name: Disable Sleep
         run: |
-          sudo systemsetup -setcomputersleep Never
-          sudo systemsetup -setdisplaysleep Never
-          echo "✅ 已禁止休眠"
+          sudo systemsetup -setcomputersleep Never || true
+          sudo systemsetup -setdisplaysleep Never || true
 
-      # 3. 修复 Windows 命令
-      - name: Fix package.json
-        run: |
-          if [ -f "package.json" ]; then
-            sed -i '' 's/chcp 65001 && //g' package.json
-          fi
-
-      # 4. 【核心升级】启动支持右键和双击的遥控器
-      - name: Start Remote Controller
+      # 3. 【提前启动】遥控服务器 (让你能看到安装和打包的过程)
+      - name: Start Remote Server & Tunnel
         run: |
           cat << 'EOF' > remote_server.py
           from flask import Flask, send_file, request
           import subprocess
           import urllib.parse
-          
           app = Flask(__name__)
-          
           @app.route('/')
           def index():
               return '''
               <html>
-              <head>
-                  <title>Mac 全能遥控器</title>
-                  <meta charset="utf-8">
-                  <style>
-                      body { background: #222; text-align: center; color: white; margin: 0; font-family: sans-serif; }
-                      #screen-box { margin-top: 10px; display: inline-block; position: relative; border: 2px solid #555; }
-                      #screen { cursor: crosshair; max-width: 95%; display: block; }
-                      
-                      /* 控制栏样式 */
-                      .controls { padding: 10px; background: #333; border-bottom: 1px solid #444; position: sticky; top: 0; }
-                      .btn-group { display: inline-flex; gap: 5px; margin-right: 15px; }
-                      button { padding: 8px 12px; background: #444; color: #ccc; border: 1px solid #666; cursor: pointer; border-radius: 4px; font-size: 14px; }
-                      button:hover { background: #555; }
-                      
-                      /* 选中状态 */
-                      button.active { background: #007bff; color: white; border-color: #0056b3; font-weight: bold; }
-                      
-                      input { padding: 8px; border-radius: 4px; border: 1px solid #555; background: #111; color: white; width: 150px; }
-                  </style>
-              </head>
+              <head><title>Mac 自动安装监控</title><meta charset="utf-8">
+              <style>body{background:#222;color:white;text-align:center;}#screen{max-width:90%;border:3px solid #555;}</style></head>
               <body>
-                  <div class="controls">
-                      <div class="btn-group">
-                          <button id="btn-click" class="active" onclick="setMode('click')">🖱️ 左键</button>
-                          <button id="btn-double" onclick="setMode('double')">🖱️🖱️ 双击</button>
-                          <button id="btn-right" onclick="setMode('right')">🖱️ 右键</button>
-                      </div>
-                      
-                      <div class="btn-group">
-                          <input type="text" id="txtInput" placeholder="输入文字...">
-                          <button onclick="sendText()">⌨️ 发送</button>
-                          <button onclick="sendEnter()">↵ 回车</button>
-                      </div>
-                      
-                      <span id="status" style="margin-left:10px; color:#0f0; font-size: 12px;">🟢 准备就绪</span>
-                  </div>
-                  
-                  <div id="screen-box">
-                      <img id="screen" src="/shot" onclick="handleClick(event)">
-                  </div>
-                  
+                  <h2>正在自动打包与安装项目...</h2>
+                  <div id="status" style="color:#0f0">🟢 系统已上线</div>
+                  <img id="screen" src="/shot" onclick="handleClick(event)">
                   <script>
                       const img = document.getElementById('screen');
-                      const status = document.getElementById('status');
-                      let currentMode = 'click'; // 默认左键模式
-                      
-                      // 1. 自动刷新画面 (1.5秒一次)
                       setInterval(() => { img.src = '/shot?t=' + new Date().getTime(); }, 1500);
-                      
-                      // 2. 切换鼠标模式
-                      function setMode(mode) {
-                          currentMode = mode;
-                          // 更新按钮样式
-                          document.querySelectorAll('button').forEach(b => b.classList.remove('active'));
-                          if(mode === 'click') document.getElementById('btn-click').classList.add('active');
-                          if(mode === 'double') document.getElementById('btn-double').classList.add('active');
-                          if(mode === 'right') document.getElementById('btn-right').classList.add('active');
-                          
-                          let modeName = mode === 'click' ? "左键" : (mode === 'double' ? "双击" : "右键");
-                          status.innerText = "🟡 当前模式: " + modeName + " (请点击屏幕)";
-                      }
-                      
-                      // 3. 处理点击事件
                       function handleClick(event) {
                           const rect = img.getBoundingClientRect();
-                          // 计算真实坐标
                           const x = Math.round((event.clientX - rect.left) * (img.naturalWidth / rect.width));
                           const y = Math.round((event.clientY - rect.top) * (img.naturalHeight / rect.height));
-                          
-                          status.innerText = `🚀 发送指令: ${currentMode} -> (${x}, ${y})`;
-                          
-                          // 发送给后端，带上 mode 参数
-                          fetch(`/action?mode=${currentMode}&x=${x}&y=${y}`)
-                              .then(() => {
-                                  // 如果是双击或右键，操作完自动切回左键，方便后续操作
-                                  if(currentMode !== 'click') {
-                                      setTimeout(() => setMode('click'), 1000);
-                                  }
-                              });
-                      }
-                      
-                      // 4. 发送文字
-                      function sendText() {
-                          const val = document.getElementById('txtInput').value;
-                          if(val) fetch('/type?text=' + encodeURIComponent(val));
-                      }
-                      
-                      // 5. 发送回车
-                      function sendEnter() {
-                          fetch('/key?k=return');
+                          fetch(`/action?mode=click&x=${x}&y=${y}`);
                       }
                   </script>
-              </body>
-              </html>
+              </body></html>
               '''
-          
           @app.route('/shot')
           def shot():
               subprocess.run(['screencapture', '-x', '-C', 'screen.png'])
               return send_file('screen.png')
-          
-          # 统一处理鼠标动作
           @app.route('/action')
           def action():
-              mode = request.args.get('mode')
-              x = request.args.get('x')
-              y = request.args.get('y')
-              
-              cmd = ''
-              if mode == 'click':
-                  cmd = f'c:{x},{y}'   # 单击
-              elif mode == 'double':
-                  cmd = f'dc:{x},{y}'  # 双击 (Double Click)
-              elif mode == 'right':
-                  cmd = f'rc:{x},{y}'  # 右键 (Right Click)
-                  
-              print(f"Executing: {cmd}")
-              subprocess.run(['cliclick', cmd])
+              x, y = request.args.get('x'), request.args.get('y')
+              subprocess.run(['cliclick', f'c:{x},{y}'])
               return "ok"
-
-          @app.route('/type')
-          def type_text():
-              text = request.args.get('text')
-              subprocess.run(['cliclick', f't:{text}'])
-              return "ok"
-              
-          @app.route('/key')
-          def key_press():
-              k = request.args.get('k')
-              subprocess.run(['cliclick', f'kp:{k}'])
-              return "ok"
-          
           if __name__ == '__main__':
               app.run(host='0.0.0.0', port=8080)
           EOF
           python3 remote_server.py &
-
-      # 5. 启动 Cloudflare (生成链接)
-      - name: Start Tunnel
-        run: |
           cloudflared tunnel --url http://localhost:8080 > tunnel.log 2>&1 &
-          sleep 10
+          sleep 5
           echo "========================================================"
-          echo "🎮 遥控链接："
+          echo "🎮 实时监控与遥控链接："
           grep -o 'https://.*\.trycloudflare.com' tunnel.log | head -n 1
           echo "========================================================"
 
-      # 6. 构建并运行 (保留你之前的配置)
-      - name: Build and Run
+      # 4. 【核心步骤】全自动安装与打包
+      - name: Auto Install and Build
         run: |
-          echo "🚀 安装依赖..."
-          npm install
-          npm install --save-dev electron-builder
-          
-          echo "📦 正在构建 (生成可运行的 .app)..."
-          ./node_modules/.bin/electron-builder --mac --x64 --dir
-          
-          echo "📂 查看构建结果："
-          ls -R dist/mac/
-          
-          echo "🚀 正在启动应用..."
-          APP_PATH=$(find dist/mac -name "*.app" | head -n 1)
-          
-          if [ -z "$APP_PATH" ]; then
-            echo "❌ 还是没找到 .app 文件！"
-            exit 1
-          else
-            echo "✅ 找到应用: $APP_PATH"
-            open "$APP_PATH"
+          echo "🚀 开始修复 package.json..."
+          if [ -f "package.json" ]; then
+            sed -i '' 's/chcp 65001 && //g' package.json
           fi
 
-      # 7. 保持运行
+          echo "📦 正在安装依赖库 (npm install)..."
+          npm install
+          
+          echo "🔨 正在打包项目 (electron-builder)..."
+          # 关键：设置 CSC_IDENTITY_AUTO_DISCOVERY=false 跳过 macOS 证书报错
+          export CSC_IDENTITY_AUTO_DISCOVERY=false
+          ./node_modules/.bin/electron-builder --mac --x64 --dir
+
+      # 5. 【自动运行】启动安装好的应用
+      - name: Launch Application
+        run: |
+          echo "📂 寻找生成的 .app 文件..."
+          APP_PATH=$(find dist/mac -name "*.app" -maxdepth 2 | head -n 1)
+          
+          if [ -n "$APP_PATH" ]; then
+            echo "✅ 找到应用并启动: $APP_PATH"
+            open "$APP_PATH"
+          else
+            echo "❌ 未找到构建好的应用，请检查 dist/mac 目录"
+            ls -R dist/
+            exit 1
+          fi
+
+      # 6. 保持环境运行 (6小时)
       - name: Keep Alive
         run: sleep 21600
