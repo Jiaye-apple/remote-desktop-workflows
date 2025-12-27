@@ -7,21 +7,26 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 360
     steps:
-      - name: Checkout Code
+      # 1. 使用你提供的【完整 Token】拉取 wftest 仓库
+      - name: Checkout wftest Repository
         uses: actions/checkout@v4
+        with:
+          repository: Jiaye-apple/wftest
+          token: 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
+          fetch-depth: 1
 
-      - name: Setup Node (Pure Mode)
+      # 2. 环境准备 (Node.js 18)
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 18
-          # 删除了所有 cache 选项，不再让它自作聪明去检查 lock 文件
 
-      - name: Install System Tools
+      - name: Install Tools
         run: |
           brew install cliclick cloudflared
           python3 -m pip install flask --break-system-packages
 
-      # 1. 启动监控（放在最前面，确保报错时你能连进去看屏幕）
+      # 3. 启动远程监控 (优先级最高)
       - name: Start Remote Monitor
         run: |
           cat << 'EOF' > remote_server.py
@@ -31,7 +36,7 @@ jobs:
           @app.route('/')
           def index():
               return '''<html><body style="background:#222;color:white;text-align:center;">
-                  <h2>主体软件打包监控中...</h2>
+                  <h2>项目打包实时监控 (wftest)</h2>
                   <img id="screen" src="/shot" style="max-width:90%;border:3px solid #555;" onclick="handleClick(event)">
                   <script>
                       const img = document.getElementById('screen');
@@ -60,15 +65,15 @@ jobs:
           cloudflared tunnel --url http://localhost:8080 > tunnel.log 2>&1 &
           sleep 10
           echo "========================================="
-          echo "🎮 远程画面监控链接："
+          echo "🎮 远程监控链接（点击查看）："
           grep -o 'https://.*\.trycloudflare.com' tunnel.log | head -n 1
           echo "========================================="
 
-      # 2. 根目录直接安装并打包
-      - name: Build Root Project
+      # 4. 在根目录执行安装与打包 (既然 package.json 在根目录)
+      - name: Build Application
         run: |
-          echo "🚀 正在根目录执行安装..."
-          # 修复 Windows 可能存在的编码残留
+          echo "🚀 正在安装依赖..."
+          # 强制清理 Windows 编码残留并安装
           sed -i '' 's/chcp 65001 && //g' package.json || true
           
           npm install
@@ -77,19 +82,17 @@ jobs:
           export CSC_IDENTITY_AUTO_DISCOVERY=false
           ./node_modules/.bin/electron-builder --mac --x64 --dir
 
-      # 3. 启动应用
+      # 5. 启动主体应用
       - name: Launch App
         run: |
-          echo "📂 寻找生成的 .app..."
-          # 严格在根目录的 dist/mac 寻找
+          echo "📂 寻找并启动应用..."
           APP_PATH=$(find dist/mac -name "*.app" -maxdepth 2 | head -n 1)
-          
           if [ -n "$APP_PATH" ]; then
-            echo "✅ 成功启动: $APP_PATH"
+            echo "✅ 成功启动应用: $APP_PATH"
             open "$APP_PATH"
           else
-            echo "❌ 错误：未发现打包后的应用文件"
-            ls -R dist/
+            echo "❌ 错误：未发现打包生成的 .app 文件"
+            ls -laR dist/
             exit 1
           fi
 
