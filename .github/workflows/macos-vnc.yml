@@ -1,4 +1,31 @@
-# 2. 启动监控 (专门针对 macOS 优化的遥控版本)
+name: Build-Full-Project
+
+# 1. 这里的格式必须绝对正确，按钮才会出现
+on:
+  workflow_dispatch: # 这个就是开启“手动运行按钮”的关键
+
+jobs:
+  build-and-run:
+    runs-on: macos-latest
+    timeout-minutes: 360
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          repository: Jiaye-apple/wftest
+          fetch-depth: 1
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
+      - name: Install Tools
+        run: |
+          brew install cliclick cloudflared
+          python3 -m pip install flask --break-system-packages
+
+      # 2. 启动增强型遥控监控
       - name: Start Remote Monitor
         run: |
           cat << 'EOF' > remote_server.py
@@ -8,114 +35,90 @@
 
           app = Flask(__name__)
 
-          # 获取 macOS 当前屏幕分辨率，确保点击位置精准
-          def get_screen_resolution():
+          def get_res():
               try:
                   cmd = "system_profiler SPDisplaysDataType | grep Resolution"
-                  res = subprocess.check_output(cmd, shell=True).decode()
-                  # 提取数字，例如 "2560 x 1600"
-                  parts = res.split(':')[-1].strip().split('x')
-                  return int(parts[0]), int(parts[1])
-              except:
-                  return 1280, 960  # 默认保底分辨率
+                  out = subprocess.check_output(cmd, shell=True).decode()
+                  res = [int(s) for s in out.replace('x', ' ').split() if s.isdigit()]
+                  return (res[0], res[1]) if len(res) >= 2 else (1280, 960)
+              except: return 1280, 960
 
           @app.route('/')
           def index():
               return '''
               <html>
-              <head>
-                  <title>macOS Remote Controller</title>
-                  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                  <style>
-                      body { background: #121212; color: #fff; font-family: sans-serif; margin: 0; text-align: center; }
-                      .header { background: #333; padding: 10px; font-weight: bold; border-bottom: 2px solid #007bff; }
-                      .screen-container { position: relative; display: inline-block; margin-top: 15px; border: 3px solid #444; cursor: crosshair; }
-                      #screen { max-width: 95vw; max-height: 75vh; display: block; }
-                      .dock { margin-top: 15px; padding: 15px; background: #222; display: flex; justify-content: center; gap: 10px; }
-                      input { padding: 8px; border-radius: 4px; border: none; width: 200px; }
-                      button { padding: 8px 15px; border-radius: 4px; border: none; background: #007bff; color: white; cursor: pointer; }
-                      button.green { background: #28a745; }
-                  </style>
-              </head>
+              <head><title>macOS Remote</title><style>
+              body{background:#1a1a1a;color:white;text-align:center;font-family:sans-serif;}
+              .screen-container{position:relative;display:inline-block;margin-top:20px;border:3px solid #444;}
+              #screen{max-width:90vw;cursor:crosshair;}
+              .controls{background:#222;padding:15px;position:fixed;bottom:0;width:100%;display:flex;justify-content:center;gap:10px;}
+              input{padding:8px;background:#000;color:#fff;border:1px solid #444;width:200px;}
+              button{padding:8px 15px;background:#007bff;color:white;border:none;border-radius:4px;cursor:pointer;}
+              </style></head>
               <body>
-                  <div class="header">macOS 远程控制面板 (GitHub Actions)</div>
-                  <div class="screen-container">
-                      <img id="screen" src="/shot" onclick="doClick(event)">
-                  </div>
-                  <div class="dock">
-                      <input type="text" id="textInput" placeholder="输入文字...">
-                      <button class="green" onclick="sendText()">输入文本</button>
-                      <button onclick="sendKey('36')">回车(Enter)</button>
-                      <button onclick="sendKey('48')">Tab</button>
-                      <button style="background:#dc3545;" onclick="location.reload()">手动刷新</button>
-                  </div>
-                  <p style="color:#888; font-size:12px;">操作提示：直接点击画面即可移动并点击鼠标</p>
-
-                  <script>
-                      // 自动刷新画面 (1.5秒一次)
-                      setInterval(() => {
-                          document.getElementById("screen").src = "/shot?t=" + new Date().getTime();
-                      }, 1500);
-
-                      function doClick(e) {
-                          const img = document.getElementById("screen");
-                          const rect = img.getBoundingClientRect();
-                          const x = (e.clientX - rect.left) / rect.width;
-                          const y = (e.clientY - rect.top) / rect.height;
-                          fetch(`/control?type=click&x_ratio=${x}&y_ratio=${y}`);
-                      }
-
-                      function sendText() {
-                          const txt = document.getElementById("textInput").value;
-                          if(!txt) return;
-                          fetch(`/control?type=type&content=${encodeURIComponent(txt)}`);
-                          document.getElementById("textInput").value = "";
-                      }
-
-                      function sendKey(code) {
-                          fetch(`/control?type=key&code=${code}`);
-                      }
-                  </script>
-              </body>
-              </html>
+              <h3>macOS 远程操控面板</h3>
+              <div class="screen-container"><img id="screen" src="/shot" onclick="handle(event)"></div>
+              <div class="controls">
+                  <input type="text" id="ti" placeholder="输入文字...">
+                  <button onclick="send('type')">输入</button>
+                  <button onclick="send('enter')" style="background:#28a745;">回车</button>
+                  <button onclick="location.reload()" style="background:#555;">刷新</button>
+              </div>
+              <script>
+              setInterval(()=>{document.getElementById("screen").src="/shot?t="+new Date().getTime();},1500);
+              function handle(e){
+                  const i=document.getElementById("screen");const r=i.getBoundingClientRect();
+                  const x=(e.clientX-r.left)/r.width;const y=(e.clientY-r.top)/r.height;
+                  fetch(`/ctl?a=click&x=${x}&y=${y}`);
+              }
+              function send(t){
+                  const v=document.getElementById("ti").value;
+                  if(t==='type'){fetch(`/ctl?a=type&v=${encodeURIComponent(v)}`);document.getElementById("ti").value='';}
+                  else{fetch(`/ctl?a=enter`);}
+              }
+              </script></body></html>
               '''
 
           @app.route('/shot')
           def shot():
-              # macOS 原生静音截图
               subprocess.run(['screencapture', '-x', 'screen.png'])
               return send_file('screen.png')
 
-          @app.route('/control')
-          def control():
-              ctrl_type = request.args.get('type')
-              w, h = get_screen_resolution()
-
-              if ctrl_type == 'click':
-                  x = int(float(request.args.get('x_ratio')) * w)
-                  y = int(float(request.args.get('y_ratio')) * h)
-                  # 使用 cliclick 模拟点击
+          @app.route('/ctl')
+          def ctl():
+              a = request.args.get('a'); w, h = get_res()
+              if a=='click':
+                  x, y = int(float(request.args.get('x'))*w), int(float(request.args.get('y'))*h)
                   subprocess.run(['cliclick', f'c:{x},{y}'])
-              
-              elif ctrl_type == 'type':
-                  content = request.args.get('content').replace('"', '\\"')
-                  # 使用 AppleScript (osascript) 模拟键盘输入
-                  subprocess.run(['osascript', '-e', f'tell application "System Events" to keystroke "{content}"'])
-              
-              elif ctrl_type == 'key':
-                  code = request.args.get('code')
-                  # 使用 AppleScript 发送特定按键码 (36是回车, 48是Tab)
-                  subprocess.run(['osascript', '-e', f'tell application "System Events" to key code {code}'])
-              
-              return jsonify(status="success")
+              elif a=='type':
+                  v = request.args.get('v').replace('"', '\\"')
+                  subprocess.run(['osascript', '-e', f'tell application "System Events" to keystroke "{v}"'])
+              elif a=='enter':
+                  subprocess.run(['osascript', '-e', 'tell application "System Events" to key code 36'])
+              return jsonify(s="ok")
 
           if __name__ == '__main__':
               app.run(host='0.0.0.0', port=8080)
           EOF
-          python3 remote_server.py &
+          python3 remote_server.py > flask.log 2>&1 &
           cloudflared tunnel --url http://localhost:8080 > tunnel.log 2>&1 &
-          sleep 5
+          sleep 8
           echo "========================================="
-          echo "🎮 远程遥控链接已就绪："
+          echo "🎮 远程链接 (点击下方链接即可操作):"
           grep -o 'https://.*\.trycloudflare.com' tunnel.log | head -n 1
           echo "========================================="
+
+      # 3. 打包与启动
+      - name: Build and Launch
+        run: |
+          sed -i '' 's/chcp 65001 && //g' package.json || true
+          npm install          
+          export CSC_IDENTITY_AUTO_DISCOVERY=false
+          ./node_modules/.bin/electron-builder --mac --x64 --dir
+          APP_PATH=$(find dist/mac -name "*.app" -maxdepth 2 | head -n 1)
+          if [ -n "$APP_PATH" ]; then
+            open "$APP_PATH"
+          fi
+
+      - name: Keep Alive
+        run: sleep 21600
