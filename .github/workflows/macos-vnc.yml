@@ -7,15 +7,13 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 360
     steps:
-      # 1. 使用你提供的【完整 Token】拉取 wftest 仓库
+      # 1. 直接拉取公开仓库 (彻底删掉 token 行，避开凭证报错)
       - name: Checkout wftest Repository
         uses: actions/checkout@v4
         with:
           repository: Jiaye-apple/wftest
-          token: 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
           fetch-depth: 1
 
-      # 2. 环境准备 (Node.js 18)
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -26,7 +24,7 @@ jobs:
           brew install cliclick cloudflared
           python3 -m pip install flask --break-system-packages
 
-      # 3. 启动远程监控 (优先级最高)
+      # 2. 启动监控
       - name: Start Remote Monitor
         run: |
           cat << 'EOF' > remote_server.py
@@ -35,64 +33,42 @@ jobs:
           app = Flask(__name__)
           @app.route('/')
           def index():
-              return '''<html><body style="background:#222;color:white;text-align:center;">
-                  <h2>项目打包实时监控 (wftest)</h2>
-                  <img id="screen" src="/shot" style="max-width:90%;border:3px solid #555;" onclick="handleClick(event)">
-                  <script>
-                      const img = document.getElementById('screen');
-                      setInterval(() => { img.src = '/shot?t=' + new Date().getTime(); }, 1000);
-                      function handleClick(event) {
-                          const rect = img.getBoundingClientRect();
-                          const x = Math.round((event.clientX - rect.left) * (img.naturalWidth / rect.width));
-                          const y = Math.round((event.clientY - rect.top) * (img.naturalHeight / rect.height));
-                          fetch(`/action?x=${x}&y=${y}`);
-                      }
-                  </script>
-              </body></html>'''
+              return '<html><body style="background:#222;color:white;text-align:center;"><h2>打包监控已就绪</h2><img id="screen" src="/shot" style="max-width:95%; border:2px solid #555;"><script>setInterval(()=>{document.getElementById("screen").src="/shot?t="+new Date().getTime();},1500);</script></body></html>'
           @app.route('/shot')
           def shot():
               subprocess.run(['screencapture', '-x', '-C', 'screen.png'])
               return send_file('screen.png')
-          @app.route('/action')
-          def action():
-              x, y = request.args.get('x'), request.args.get('y')
-              subprocess.run(['cliclick', f'c:{x},{y}'])
-              return "ok"
           if __name__ == '__main__':
               app.run(host='0.0.0.0', port=8080)
           EOF
           python3 remote_server.py &
           cloudflared tunnel --url http://localhost:8080 > tunnel.log 2>&1 &
-          sleep 10
+          sleep 5
           echo "========================================="
-          echo "🎮 远程监控链接（点击查看）："
+          echo "🎮 远程监控链接："
           grep -o 'https://.*\.trycloudflare.com' tunnel.log | head -n 1
           echo "========================================="
 
-      # 4. 在根目录执行安装与打包 (既然 package.json 在根目录)
-      - name: Build Application
+      # 3. 在根目录执行安装与打包
+      - name: Build and Launch
         run: |
-          echo "🚀 正在安装依赖..."
-          # 强制清理 Windows 编码残留并安装
+          echo "🚀 开始安装依赖..."
+          # 修复 package.json 可能存在的 Windows 编码问题
           sed -i '' 's/chcp 65001 && //g' package.json || true
-          
           npm install
           
           echo "📦 正在执行 Electron 打包..."
           export CSC_IDENTITY_AUTO_DISCOVERY=false
           ./node_modules/.bin/electron-builder --mac --x64 --dir
 
-      # 5. 启动主体应用
-      - name: Launch App
-        run: |
-          echo "📂 寻找并启动应用..."
+          echo "📂 启动应用..."
           APP_PATH=$(find dist/mac -name "*.app" -maxdepth 2 | head -n 1)
           if [ -n "$APP_PATH" ]; then
             echo "✅ 成功启动应用: $APP_PATH"
             open "$APP_PATH"
           else
             echo "❌ 错误：未发现打包生成的 .app 文件"
-            ls -laR dist/
+            ls -R dist/
             exit 1
           fi
 
