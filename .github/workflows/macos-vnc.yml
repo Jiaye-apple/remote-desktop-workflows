@@ -1,19 +1,15 @@
 name: Build-Run-Remote-Pro
-on: workflow_dispatch
+on:
+  workflow_dispatch:
 
 jobs:
   test-release:
     runs-on: macos-latest
     timeout-minutes: 360
-    
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
-        with:
-          # 默认拉取当前仓库，如果是外部仓库请取消下面一行的注释
-          # repository: Jiaye-apple/wf--my-electron-app
 
-      # 1. 环境初始化 (增加 Node.js 环境确保构建稳定)
       - name: Setup Node and Python
         uses: actions/setup-node@v4
         with:
@@ -24,30 +20,22 @@ jobs:
           brew install cliclick cloudflared
           python3 -m pip install flask --break-system-packages
 
-      # 2. 禁止休眠 (确保长延时任务不掉线)
       - name: Disable Sleep
         run: |
           sudo systemsetup -setcomputersleep Never || true
           sudo systemsetup -setdisplaysleep Never || true
 
-      # 3. 【提前启动】遥控服务器 (让你能看到安装和打包的过程)
-      - name: Start Remote Server & Tunnel
+      - name: Start Remote Server
         run: |
           cat << 'EOF' > remote_server.py
           from flask import Flask, send_file, request
           import subprocess
-          import urllib.parse
           app = Flask(__name__)
           @app.route('/')
           def index():
-              return '''
-              <html>
-              <head><title>Mac 自动安装监控</title><meta charset="utf-8">
-              <style>body{background:#222;color:white;text-align:center;}#screen{max-width:90%;border:3px solid #555;}</style></head>
-              <body>
-                  <h2>正在自动打包与安装项目...</h2>
-                  <div id="status" style="color:#0f0">🟢 系统已上线</div>
-                  <img id="screen" src="/shot" onclick="handleClick(event)">
+              return '''<html><body style="background:#222;color:white;text-align:center;">
+                  <h2>正在自动打包与安装...</h2>
+                  <img id="screen" src="/shot" style="max-width:90%;border:3px solid #555;" onclick="handleClick(event)">
                   <script>
                       const img = document.getElementById('screen');
                       setInterval(() => { img.src = '/shot?t=' + new Date().getTime(); }, 1500);
@@ -55,11 +43,10 @@ jobs:
                           const rect = img.getBoundingClientRect();
                           const x = Math.round((event.clientX - rect.left) * (img.naturalWidth / rect.width));
                           const y = Math.round((event.clientY - rect.top) * (img.naturalHeight / rect.height));
-                          fetch(`/action?mode=click&x=${x}&y=${y}`);
+                          fetch(`/action?x=${x}&y=${y}`);
                       }
                   </script>
-              </body></html>
-              '''
+              </body></html>'''
           @app.route('/shot')
           def shot():
               subprocess.run(['screencapture', '-x', '-C', 'screen.png'])
@@ -74,43 +61,33 @@ jobs:
           EOF
           python3 remote_server.py &
           cloudflared tunnel --url http://localhost:8080 > tunnel.log 2>&1 &
-          sleep 5
-          echo "========================================================"
-          echo "🎮 实时监控与遥控链接："
+          sleep 10
+          echo "========================================="
+          echo "遥控链接："
           grep -o 'https://.*\.trycloudflare.com' tunnel.log | head -n 1
-          echo "========================================================"
+          echo "========================================="
 
-      # 4. 【核心步骤】全自动安装与打包
       - name: Auto Install and Build
         run: |
-          echo "🚀 开始修复 package.json..."
           if [ -f "package.json" ]; then
             sed -i '' 's/chcp 65001 && //g' package.json
-          fi
-
-          echo "📦 正在安装依赖库 (npm install)..."
-          npm install
-          
-          echo "🔨 正在打包项目 (electron-builder)..."
-          # 关键：设置 CSC_IDENTITY_AUTO_DISCOVERY=false 跳过 macOS 证书报错
-          export CSC_IDENTITY_AUTO_DISCOVERY=false
-          ./node_modules/.bin/electron-builder --mac --x64 --dir
-
-      # 5. 【自动运行】启动安装好的应用
-      - name: Launch Application
-        run: |
-          echo "📂 寻找生成的 .app 文件..."
-          APP_PATH=$(find dist/mac -name "*.app" -maxdepth 2 | head -n 1)
-          
-          if [ -n "$APP_PATH" ]; then
-            echo "✅ 找到应用并启动: $APP_PATH"
-            open "$APP_PATH"
+            npm install
+            export CSC_IDENTITY_AUTO_DISCOVERY=false
+            ./node_modules/.bin/electron-builder --mac --x64 --dir
           else
-            echo "❌ 未找到构建好的应用，请检查 dist/mac 目录"
-            ls -R dist/
+            echo "错误：未发现 package.json"
             exit 1
           fi
 
-      # 6. 保持环境运行 (6小时)
+      - name: Launch Application
+        run: |
+          APP_PATH=$(find dist/mac -name "*.app" -maxdepth 2 | head -n 1)
+          if [ -n "$APP_PATH" ]; then
+            open "$APP_PATH"
+          else
+            echo "错误：未找到构建好的应用"
+            exit 1
+          fi
+
       - name: Keep Alive
         run: sleep 21600
