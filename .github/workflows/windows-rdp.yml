@@ -1,4 +1,4 @@
-name: Chrome-RDP
+name: Final-Fix-RDP
 
 on:
   workflow_dispatch:
@@ -6,41 +6,58 @@ on:
 jobs:
   build:
     runs-on: windows-latest
-    timeout-minutes: 360 # 挂机6小时
+    timeout-minutes: 360
     
     steps:
-    - name: 初始化设置
+    - name: 1. 初始化系统环境
       run: |
+        # 强制开启 RDP 用户认证模式，防止连接中断
         Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "UserAuthentication" -value 1
         
-    - name: 安装谷歌远程桌面
+    - name: 2. 下载安装谷歌远程桌面
       run: |
-        # 1. 下载安装包
         Invoke-WebRequest https://dl.google.com/edgedl/chrome-remote-desktop/chromeremotedesktophost.msi -OutFile crd.msi
-        
-        # 2. 静默安装
         Start-Process msiexec.exe -ArgumentList "/i crd.msi /qn" -Wait
         
-        # 3. 运行你填入的 CRD_CODE 进行授权
-        $codeCommand = '${{ secrets.CRD_CODE }}'
+    - name: 3. 注入授权码并启动 (已修复PIN码卡死问题)
+      run: |
+        # 读取你填入的 Secrets
+        $rawCommand = "${{ secrets.CRD_CODE }}"
+        $myPin = "${{ secrets.PIN }}"
         
-        if (-not $codeCommand) {
-            Write-Error "CRD_CODE 为空！请检查 GitHub Secrets 设置！"
+        # 检查是否忘记填 Secret
+        if (-not $rawCommand) {
+            Write-Error "严重错误：CRD_CODE 为空！请去 Secrets 填入谷歌最新的授权代码！"
             exit 1
         }
         
-        # 执行授权命令
-        Invoke-Expression $codeCommand
+        # 【核心修复】如果原命令里没有 --pin 参数，我们强制拼上去
+        # 这样系统就不会再弹窗询问 "Enter a PIN" 了
+        if ($rawCommand -notmatch "--pin") {
+            $finalCommand = "$rawCommand --pin=$myPin"
+        } else {
+            $finalCommand = $rawCommand
+        }
+        
+        Write-Host "正在执行授权命令 (已注入自动PIN码)..."
+        
+        # 执行最终命令
+        try {
+            Invoke-Expression $finalCommand
+        } catch {
+            Write-Error "授权失败！最大的可能是授权码过期了，请重新去谷歌网页复制一个新的！"
+            exit 1
+        }
 
-    - name: 成功！保持运行
+    - name: 4. 成功！保持连接
       run: |
         Write-Host "==================================================="
-        Write-Host "恭喜！环境已启动。"
+        Write-Host "【运行成功】"
         Write-Host "现在请去 https://remotedesktop.google.com/access"
-        Write-Host "连接那台叫 'windows-latest' 的电脑，输入PIN码: ${{ secrets.PIN }}"
+        Write-Host "你会看到这台电脑，连接密码是: ${{ secrets.PIN }}"
         Write-Host "==================================================="
         
-        # 防止进程结束
+        # 死循环挂机
         while ($true) {
           Start-Sleep -Seconds 60
         }
