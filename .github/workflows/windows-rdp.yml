@@ -1,4 +1,4 @@
-name: Final-Fix-RDP
+name: Debug-Fixed-RDP
 
 on:
   workflow_dispatch:
@@ -9,55 +9,48 @@ jobs:
     timeout-minutes: 360
     
     steps:
-    - name: 1. 初始化系统环境
+    - name: 1. 初始化环境
       run: |
-        # 强制开启 RDP 用户认证模式，防止连接中断
         Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "UserAuthentication" -value 1
         
-    - name: 2. 下载安装谷歌远程桌面
+    - name: 2. 下载谷歌远程桌面
       run: |
         Invoke-WebRequest https://dl.google.com/edgedl/chrome-remote-desktop/chromeremotedesktophost.msi -OutFile crd.msi
         Start-Process msiexec.exe -ArgumentList "/i crd.msi /qn" -Wait
         
-    - name: 3. 注入授权码并启动 (已修复PIN码卡死问题)
+    - name: 3. 授权并启动 (修复引号报错)
+      # 【关键修改】通过环境变量传递 Secrets，绝对不会报语法错误
+      env:
+        RAW_CODE: ${{ secrets.CRD_CODE }}
+        MY_PIN: ${{ secrets.PIN }}
       run: |
-        # 读取你填入的 Secrets
-        $rawCommand = "${{ secrets.CRD_CODE }}"
-        $myPin = "${{ secrets.PIN }}"
+        # 从环境变量读取，不经过代码解析，安全
+        $cmd = $env:RAW_CODE
+        $pin = $env:MY_PIN
         
-        # 检查是否忘记填 Secret
-        if (-not $rawCommand) {
-            Write-Error "严重错误：CRD_CODE 为空！请去 Secrets 填入谷歌最新的授权代码！"
+        if (-not $cmd) {
+            Write-Error "CRD_CODE 为空！请检查 Secrets！"
             exit 1
         }
-        
-        # 【核心修复】如果原命令里没有 --pin 参数，我们强制拼上去
-        # 这样系统就不会再弹窗询问 "Enter a PIN" 了
-        if ($rawCommand -notmatch "--pin") {
-            $finalCommand = "$rawCommand --pin=$myPin"
+
+        # 强制拼接 PIN 码，防止卡住
+        if ($cmd -notmatch "--pin") {
+            $finalCmd = "$cmd --pin=$pin"
         } else {
-            $finalCommand = $rawCommand
+            $finalCmd = $cmd
         }
         
-        Write-Host "正在执行授权命令 (已注入自动PIN码)..."
-        
-        # 执行最终命令
-        try {
-            Invoke-Expression $finalCommand
-        } catch {
-            Write-Error "授权失败！最大的可能是授权码过期了，请重新去谷歌网页复制一个新的！"
-            exit 1
-        }
+        Write-Host "正在执行授权..."
+        # 运行命令
+        Invoke-Expression $finalCmd
 
     - name: 4. 成功！保持连接
       run: |
         Write-Host "==================================================="
-        Write-Host "【运行成功】"
-        Write-Host "现在请去 https://remotedesktop.google.com/access"
-        Write-Host "你会看到这台电脑，连接密码是: ${{ secrets.PIN }}"
+        Write-Host "运行成功！"
+        Write-Host "请访问 https://remotedesktop.google.com/access"
+        Write-Host "PIN码: ${{ secrets.PIN }}"
         Write-Host "==================================================="
-        
-        # 死循环挂机
         while ($true) {
           Start-Sleep -Seconds 60
         }
